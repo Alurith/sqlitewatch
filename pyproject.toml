@@ -1,0 +1,31 @@
+[project]
+name = "sqlitewatch"
+version = "0.1.0"
+description = "Passive SQLite runtime instrumentation proof of concept"
+readme = "poc-plan.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "frida==17.16.1",
+]
+
+[project.scripts]
+sqlitewatch = "sqlitewatch.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sqlitewatch"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires native build tools and a working Frida installation",
+]
+testpaths = ["tests"]
+addopts = "-ra"

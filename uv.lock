@@ -1,0 +1,104 @@
+version = 1
+revision = 3
+requires-python = ">=3.11, <3.14"
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "frida"
+version = "17.16.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/aa/2149c62a922cc9774d0a8c4de54e8e0a0c8e22042f6e53dacc7466a7c080/frida-17.16.1.tar.gz", hash = "sha256:2302ca98943cc8bd8467f8e4b9e3218302414019fdf96444a272ea8552eda069", size = 929804, upload-time = "2026-07-18T12:24:45.784Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/cd/72784874bfd25c4ce8ead29c45459286dde9a6127f72a0c95aee2221c7f7/frida-17.16.1-cp37-abi3-macosx_10_13_x86_64.whl", hash = "sha256:b00689e05b94fa9c4d48f03f63245d5cd67998dcce640f54f1136d515a283232", size = 23278841, upload-time = "2026-07-18T12:24:02.976Z" },
+    { url = "https://files.pythonhosted.org/packages/12/b0/5f77669851b09d6a755a764108e5918d44b3609616be65861d6882cabf5f/frida-17.16.1-cp37-abi3-macosx_11_0_arm64.whl", hash = "sha256:7d8ea3ec84cef6333414fd099a7aa31941161a20704421f0e34979de890368fa", size = 32430118, upload-time = "2026-07-18T12:24:07.397Z" },
+    { url = "https://files.pythonhosted.org/packages/77/34/c005f44959c3bad5627fa22a235dbb0283a1176b633c8920c18bb2612806/frida-17.16.1-cp37-abi3-manylinux1_i686.whl", hash = "sha256:5e043e34aa128bac960b31430826f8b59ac9a263dff87b0e1240ff4954e8b79a", size = 20797285, upload-time = "2026-07-18T12:24:10.179Z" },
+    { url = "https://files.pythonhosted.org/packages/56/77/21d4adf223c4bc43161a9e2d4caa591172cdb12d2c652c105eb4e8c1913e/frida-17.16.1-cp37-abi3-manylinux1_x86_64.whl", hash = "sha256:322bb7b395574b0c2f3e69aabe882381f0984473838b70355049946038ddfc42", size = 33245694, upload-time = "2026-07-18T12:24:13.783Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/13/3331fb52fcc933e022eb0dd143501e526e97cfbf24f163e688c28fa242c0/frida-17.16.1-cp37-abi3-manylinux2014_aarch64.whl", hash = "sha256:b01ed7f08e4a121f412a5559640586b0a06002d27361f68691486854b54a3918", size = 21603221, upload-time = "2026-07-18T12:24:16.836Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/62/43a767dcc54c315d8e5644a2ed53ec04acefeac904424294ceb2900dfed9/frida-17.16.1-cp37-abi3-manylinux2014_armv7l.whl", hash = "sha256:9ec25d193a3a0372d43228ba26232f723c6e7e8e937002d12aea70db3400e733", size = 19405968, upload-time = "2026-07-18T12:24:20.083Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/7a/a849732ad17a84030afc18f5825402e3ef50fb62bdf10bff4327544b860d/frida-17.16.1-cp37-abi3-manylinux_2_17_aarch64.whl", hash = "sha256:08942162c100415f3b384722887ed4d3171569b0b5a5ea104be665165fad5358", size = 21603222, upload-time = "2026-07-18T12:24:23.148Z" },
+    { url = "https://files.pythonhosted.org/packages/34/1d/f2123fee203bab921539bd31a7bb319ff9cddc09f787c46daedeac9a3648/frida-17.16.1-cp37-abi3-manylinux_2_17_armv7l.whl", hash = "sha256:e990a3574b6d1e8476339b1ac82a206b272d68183dcba439d73350effb9c4deb", size = 19405969, upload-time = "2026-07-18T12:24:26.05Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/4e/9bcef14fa1970b2532dfcbe05b417cb383f966372d1e9c8a632ba983c331/frida-17.16.1-cp37-abi3-manylinux_2_5_i686.whl", hash = "sha256:fdcfd8e399e78150842928c43cc573fb6f5984c53a6498ecb98cfefadc87a340", size = 20797288, upload-time = "2026-07-18T12:24:28.876Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/37/b6cf77a6d934098c612c0d4919036f63f356b0173073510e78d168751394/frida-17.16.1-cp37-abi3-manylinux_2_5_x86_64.whl", hash = "sha256:e7b621c9f8bbac5be0ecb3d2240f3d6318f3c8f902ff2e214f1cf448bd27c33e", size = 33245694, upload-time = "2026-07-18T12:24:31.955Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/c7/6eb31765795f277c2b872d98ef2ce807d2c7474a6be5cfb204eee9748926/frida-17.16.1-cp37-abi3-win32.whl", hash = "sha256:ce294bb1c2cd4fd61bb57a9fcf1b2c4fe52c57a1ff180463be3f344f2a4b1cc5", size = 39203093, upload-time = "2026-07-18T12:24:35.628Z" },
+    { url = "https://files.pythonhosted.org/packages/16/06/c214f75b7c5cd704964fa46878b27c5c8f7027b6abcdce863368db65234c/frida-17.16.1-cp37-abi3-win_amd64.whl", hash = "sha256:7041cd47f831b9d58116a7dcc321f4a81e9d7fecdfbb72a051cdaf1530aff6f2", size = 41828120, upload-time = "2026-07-18T12:24:39.172Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/70/b09da1280e3e175ebad76c0b2482ddea5e307b5f16877d7a4bcae37c0c9f/frida-17.16.1-cp37-abi3-win_arm64.whl", hash = "sha256:65be93f09e0175f0abcc69413e1e3ff647974325f999c316651a823c231d559f", size = 51797358, upload-time = "2026-07-18T12:24:42.846Z" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "packaging"
+version = "26.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/f1/e7a6dd94a8d4a5626c03e4e99c87f241ba9e350cd9e6d75123f992427270/packaging-26.2.tar.gz", hash = "sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661", size = 228134, upload-time = "2026-04-24T20:15:23.917Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl", hash = "sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e", size = 100195, upload-time = "2026-04-24T20:15:22.081Z" },
+]
+
+[[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "pygments"
+version = "2.20.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f", size = 4955991, upload-time = "2026-03-29T13:29:33.898Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
+]
+
+[[package]]
+name = "pytest"
+version = "8.4.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/5c/00a0e072241553e1a7496d638deababa67c5058571567b92a7eaa258397c/pytest-8.4.2.tar.gz", hash = "sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01", size = 1519618, upload-time = "2025-09-04T14:34:22.711Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/a4/20da314d277121d6534b3a980b29035dcd51e6744bd79075a6ce8fa4eb8d/pytest-8.4.2-py3-none-any.whl", hash = "sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79", size = 365750, upload-time = "2025-09-04T14:34:20.226Z" },
+]
+
+[[package]]
+name = "sqlitewatch"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "frida" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "frida", specifier = "==17.16.1" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8,<9" }]
