@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from sqlitewatch.events import InstrumentationStatus
+from sqlitewatch.events import InstrumentationStatus, StatementExecuted, StatementFinalized
 from sqlitewatch.process import ProcessController
 from tests.integration.matrix_support import build_matrix_record
 
@@ -120,4 +120,13 @@ def test_node_binding_is_optional_and_matrix_classified(node_tools_available):
         assert record.sql_captured
         assert record.prepared_v3
         assert record.executions_observed and record.finalizations_observed
+        assert record.metrics_active and record.metrics_observed
+        sorted_statement = next(event for event in result.statements if event.sql == SORT_SQL)
+        start = result.events.index(sorted_statement)
+        end = next(
+            index for index, event in enumerate(result.events[start + 1:], start + 1)
+            if isinstance(event, StatementFinalized) and event.statement == sorted_statement.statement
+        )
+        sorted_executions = [event for event in result.events[start + 1:end] if isinstance(event, StatementExecuted)]
+        assert any(event.sorts > 0 for event in sorted_executions)
         assert record.module and record.path

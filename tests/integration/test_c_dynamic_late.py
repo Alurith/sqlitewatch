@@ -37,7 +37,9 @@ def test_late_loaded_sqlite_is_observed(native_tools_available):
     assert result.target_exit_code == 0
     assert any(event.sql == SQL for event in result.statements)
     assert len(result.statements) == len({(event.statement, event.sql) for event in result.statements})
-    assert any(isinstance(event, StatementExecuted) for event in result.events)
+    executions = [event for event in result.events if isinstance(event, StatementExecuted)]
+    assert executions
+    assert all(event.fullscan_steps is not None and event.vm_steps is not None for event in executions)
     assert any(isinstance(event, StatementFinalized) for event in result.events)
     assert normal.stdout in instrumented.stdout
 

@@ -22,6 +22,14 @@ static int run_select_cycle(sqlite3_stmt *stmt, int id) {
     return sqlite3_step(stmt) == SQLITE_DONE;
 }
 
+static int run_to_done(sqlite3_stmt *stmt) {
+    int rc;
+    do {
+        rc = sqlite3_step(stmt);
+    } while (rc == SQLITE_ROW);
+    return rc == SQLITE_DONE;
+}
+
 int main(int argc, char **argv) {
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
@@ -61,6 +69,52 @@ int main(int argc, char **argv) {
     if (!check(rc, db, "prepare v3")) { result = 11; goto done; }
     if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 42) {
         result = 12; goto done;
+    }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    /* Controlled metric workloads: properties, not version-specific totals. */
+    rc = sqlite3_exec(db,
+        "CREATE TABLE scan_rows (id INTEGER PRIMARY KEY, value INTEGER NOT NULL);"
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<256) "
+        "INSERT INTO scan_rows SELECT x, x % 17 FROM n;"
+        "PRAGMA automatic_index = ON;"
+        "CREATE TABLE join_left (join_key INTEGER NOT NULL, payload INTEGER NOT NULL);"
+        "CREATE TABLE join_right (join_key INTEGER NOT NULL, payload INTEGER NOT NULL);"
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<256) "
+        "INSERT INTO join_left SELECT x, x % 5 FROM n;"
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<256) "
+        "INSERT INTO join_right SELECT x, x % 7 FROM n;",
+        NULL, NULL, NULL);
+    if (!check(rc, db, "create metric data")) { result = 13; goto done; }
+
+    const char scan_sql[] = "SELECT value FROM scan_rows WHERE value = ?";
+    rc = sqlite3_prepare_v2(db, scan_sql, -1, &stmt, NULL);
+    if (!check(rc, db, "prepare scan")) { result = 14; goto done; }
+    sqlite3_bind_int(stmt, 1, 3);
+    if (!run_to_done(stmt)) { result = 15; goto done; }
+    if (sqlite3_reset(stmt) != SQLITE_OK) { result = 16; goto done; }
+    sqlite3_bind_int(stmt, 1, 4);
+    if (!run_to_done(stmt)) { result = 17; goto done; }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = sqlite3_prepare_v2(db, "SELECT value FROM scan_rows ORDER BY value DESC", -1, &stmt, NULL);
+    if (!check(rc, db, "prepare sort")) { result = 18; goto done; }
+    if (!run_to_done(stmt)) { result = 19; goto done; }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT count(*) FROM join_left AS l JOIN join_right AS r ON l.join_key = r.join_key WHERE l.payload = ?",
+        -1, &stmt, NULL);
+    if (!check(rc, db, "prepare autoindex join")) { result = 20; goto done; }
+    sqlite3_bind_int(stmt, 1, 3);
+    if (!run_to_done(stmt)) { result = 21; goto done; }
+    if (sqlite3_stmt_status(stmt, SQLITE_STMTSTATUS_AUTOINDEX, 0) <= 0) {
+        fprintf(stderr, "autoindex workload did not select an automatic index\n");
+        result = 22;
+        goto done;
     }
     sqlite3_finalize(stmt);
     stmt = NULL;

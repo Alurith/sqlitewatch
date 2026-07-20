@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from sqlitewatch.events import InstrumentationStatus
+from sqlitewatch.events import InstrumentationStatus, StatementExecuted
 from sqlitewatch.process import ProcessController
 from tests.integration.matrix_support import build_matrix_record
 
@@ -57,5 +57,6 @@ def test_python_stdlib_sqlite_is_instrumented(native_tools_available):
         assert record.status == "PASS", record.diagnostic()
         assert record.module and record.path
         assert record.linkage in {"dynamic", "embedded_or_unknown"}
-        assert record.lifecycle_active
-        assert record.executions_observed
+        assert record.lifecycle_active and record.metrics_active
+        assert record.executions_observed and record.metrics_observed
+        assert all(event.vm_steps is not None for event in result.events if isinstance(event, StatementExecuted))

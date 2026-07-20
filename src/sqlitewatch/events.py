@@ -19,6 +19,17 @@ class BackendReady:
 
 
 @dataclass(frozen=True, slots=True)
+class LauncherReady:
+    """The gated launcher is attached and may safely be resumed."""
+
+    pid: int
+    protocol_version: int = PROTOCOL_VERSION
+    arch: str = "x64"
+    platform: str = "linux"
+    type: str = field(default="launcher_ready", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class SqliteDetected:
     pid: int
     module: str
@@ -65,6 +76,10 @@ class StatementExecuted:
     execution_number: int
     sqlite_rc: int
     boundary: Literal["done", "error", "reset", "finalize"]
+    fullscan_steps: int | None = None
+    vm_steps: int | None = None
+    sorts: int | None = None
+    autoindex: int | None = None
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="statement_executed", init=False)
 
@@ -104,6 +119,7 @@ class ProcessExited:
 
 Event: TypeAlias = (
     BackendReady
+    | LauncherReady
     | SqliteDetected
     | InstrumentationStatus
     | StatementPrepared

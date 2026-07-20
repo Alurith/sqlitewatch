@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from sqlitewatch.events import StatementExecuted
 from sqlitewatch.process import ProcessController
 from tests.integration.matrix_support import build_matrix_record
 
@@ -48,8 +49,9 @@ def test_embedded_fixture_and_stripped_limit(embedded_tools_available):
     )
     assert record.status == "PASS", record.diagnostic()
     assert record.linkage == "embedded_or_unknown"
-    assert record.lifecycle_active
-    assert record.executions_observed and record.finalizations_observed
+    assert record.lifecycle_active and record.metrics_active
+    assert record.executions_observed and record.finalizations_observed and record.metrics_observed
+    assert all(event.fullscan_steps is not None for event in result.events if isinstance(event, StatementExecuted))
 
     subprocess.run(["make", "-C", str(FIXTURE_DIR), "stripped"], check=True)
     stripped_command = (str(STRIPPED),)

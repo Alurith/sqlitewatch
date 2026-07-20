@@ -1,12 +1,10 @@
 import pytest
 
-from sqlitewatch.events import (
-    RunResult,
-    StatementExecuted,
-    StatementFinalized,
-    StatementPrepared,
-)
+from sqlitewatch.events import RunResult, StatementExecuted, StatementFinalized, StatementPrepared
 from sqlitewatch.instrumentation.protocol import ProtocolError, event_to_payload, payload_to_event
+
+
+METRICS = dict(fullscan_steps=1, vm_steps=2, sorts=0, autoindex=0)
 
 
 def test_statement_round_trip_unicode_and_pointer_strings():
@@ -25,25 +23,28 @@ def test_truncated_sql_metadata_round_trip():
     assert payload_to_event(event_to_payload(event)).sql_truncated
 
 
-@pytest.mark.parametrize("event", [
-    StatementExecuted(
+@pytest.mark.parametrize("metrics", [METRICS, dict(fullscan_steps=0, vm_steps=0, sorts=0, autoindex=0), dict(fullscan_steps=None, vm_steps=None, sorts=None, autoindex=None)])
+def test_execution_metrics_round_trip(metrics):
+    event = StatementExecuted(
         pid=123, tid=456, module="libsqlite3.so.0", statement="0x123456",
-        database="0x987654", execution_number=2, sqlite_rc=101, boundary="done",
-    ),
-    StatementFinalized(
-        pid=123, tid=456, module="libsqlite3.so.0", statement="0x123456",
-        database="0x987654", executions=2, sqlite_rc=0,
-    ),
-])
-def test_lifecycle_events_round_trip(event):
+        database="0x987654", execution_number=2, sqlite_rc=101, boundary="done", **metrics,
+    )
     payload = event_to_payload(event)
     assert payload["protocol_version"] == 1
     assert payload_to_event(payload) == event
 
 
+def test_finalized_round_trip():
+    event = StatementFinalized(
+        pid=123, tid=456, module="libsqlite3.so.0", statement="0x123456",
+        database="0x987654", executions=2, sqlite_rc=0,
+    )
+    assert payload_to_event(event_to_payload(event)) == event
+
+
 def test_run_result_exposes_lifecycle_collections_without_changing_prepared_alias():
     prepared = StatementPrepared(1, 1, "x", "0x1", "0x2", "SELECT 1")
-    executed = StatementExecuted(1, 1, "x", "0x1", "0x2", 1, 101, "done")
+    executed = StatementExecuted(1, 1, "x", "0x1", "0x2", 1, 101, "done", **METRICS)
     finalized = StatementFinalized(1, 1, "x", "0x1", "0x2", 1, 0)
     result = RunResult(1, 0, None, events=(prepared, executed, finalized))
     assert result.statements == (prepared,)

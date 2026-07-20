@@ -122,3 +122,4 @@ def test_complete_matrix_does_not_hide_failures(native_tools_available):
     assert records[2].status in {"PASS", "UNSUPPORTED"}, summary
     assert records[3].status in {"PASS", "SKIPPED", "UNSUPPORTED"}, summary
     assert all(record.status != "PASS" or record.sql_captured for record in records), summary
+    assert all(record.status != "PASS" or (record.metrics_active and record.metrics_observed) for record in records), summary

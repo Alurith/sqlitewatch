@@ -24,7 +24,9 @@ check-linkage: $(BINARY)
 check-symbols: $(BINARY)
 	@nm -g $(BINARY) | grep -E '[[:space:]]sqlite3_prepare_v2$$' >/dev/null || \
 		(echo 'sqlite3_prepare_v2 symbol not found' >&2; exit 1)
-	@echo 'sqlite3_prepare_v2 symbol verified'
+	@nm -g $(BINARY) | grep -E '[[:space:]]sqlite3_stmt_status$$' >/dev/null || \
+		(echo 'sqlite3_stmt_status symbol not found' >&2; exit 1)
+	@echo 'sqlite3_prepare_v2 and sqlite3_stmt_status symbols verified'
 
 stripped: $(SOURCES) sqlite3.h
 	$(CC) $(CFLAGS) -o $(STRIPPED) fixture.c sqlite3.c

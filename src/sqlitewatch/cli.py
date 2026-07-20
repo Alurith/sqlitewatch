@@ -74,9 +74,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif isinstance(event, StatementPrepared):
             print(f"[statement_prepared] {event.sql}")
         elif isinstance(event, StatementExecuted):
+            metrics = (
+                "metrics=unavailable" if event.fullscan_steps is None else
+                "fullscan_steps={0} vm_steps={1} sorts={2} autoindex={3}".format(
+                    event.fullscan_steps, event.vm_steps, event.sorts, event.autoindex
+                )
+            )
             print(
                 f"[statement_executed] {event.statement} execution={event.execution_number} "
-                f"rc={event.sqlite_rc} boundary={event.boundary}"
+                f"rc={event.sqlite_rc} boundary={event.boundary} {metrics}"
             )
         elif isinstance(event, StatementFinalized):
             print(

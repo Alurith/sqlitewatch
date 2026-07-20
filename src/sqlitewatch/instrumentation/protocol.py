@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from ..events import (
     PROTOCOL_VERSION,
     BackendReady,
+    LauncherReady,
     Event,
     InstrumentationError,
     InstrumentationStatus,
@@ -22,6 +23,7 @@ from ..events import (
 _POINTER = re.compile(r"^0x[0-9a-f]+$")
 _TYPES = {
     "backend_ready",
+    "launcher_ready",
     "sqlite_detected",
     "instrumentation_status",
     "statement_prepared",
@@ -32,10 +34,11 @@ _TYPES = {
 }
 _ALLOWED_FIELDS = {
     "backend_ready": {"type", "protocol_version", "pid", "arch", "platform"},
+    "launcher_ready": {"type", "protocol_version", "pid", "arch", "platform"},
     "sqlite_detected": {"type", "protocol_version", "pid", "module", "path", "symbol", "address", "linkage"},
     "instrumentation_status": {"type", "protocol_version", "status", "pid", "hooks", "reason"},
     "statement_prepared": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "sql", "sqlite_rc", "sql_truncated", "captured_bytes"},
-    "statement_executed": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "execution_number", "sqlite_rc", "boundary"},
+    "statement_executed": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "execution_number", "sqlite_rc", "boundary", "fullscan_steps", "vm_steps", "sorts", "autoindex"},
     "statement_finalized": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "executions", "sqlite_rc"},
     "instrumentation_error": {"type", "protocol_version", "phase", "message", "pid", "fatal", "sqlite_rc"},
     "process_exited": {"type", "protocol_version", "pid", "exit_code", "signal"},
@@ -109,6 +112,13 @@ def payload_to_event(payload: Any) -> Event:
             arch=str(data.get("arch", "x64")),
             platform=str(data.get("platform", "linux")),
         )
+    if event_type == "launcher_ready":
+        _required(data, "pid")
+        return LauncherReady(
+            pid=_positive_int(data["pid"], "pid"),
+            arch=str(data.get("arch", "x64")),
+            platform=str(data.get("platform", "linux")),
+        )
     if event_type == "sqlite_detected":
         _required(data, "pid", "module", "path", "symbol", "address")
         return SqliteDetected(
@@ -151,6 +161,7 @@ def payload_to_event(payload: Any) -> Event:
         boundary = _string(data["boundary"], "boundary")
         if boundary not in {"done", "error", "reset", "finalize"}:
             raise ProtocolError(f"unknown execution boundary: {boundary!r}")
+        metrics = _execution_metrics(data)
         return StatementExecuted(
             pid=_positive_int(data["pid"], "pid"),
             tid=_positive_int(data["tid"], "tid"),
@@ -160,6 +171,10 @@ def payload_to_event(payload: Any) -> Event:
             execution_number=_positive_int(data["execution_number"], "execution_number"),
             sqlite_rc=_integer(data["sqlite_rc"], "sqlite_rc"),
             boundary=boundary,
+            fullscan_steps=metrics[0],
+            vm_steps=metrics[1],
+            sorts=metrics[2],
+            autoindex=metrics[3],
         )
     if event_type == "statement_finalized":
         _required(data, "pid", "tid", "module", "statement", "database", "executions", "sqlite_rc")
@@ -202,6 +217,20 @@ def payload_to_event(payload: Any) -> Event:
     )
 
 
+def _execution_metrics(payload: Mapping[str, Any]) -> tuple[int | None, int | None, int | None, int | None]:
+    names = ("fullscan_steps", "vm_steps", "sorts", "autoindex")
+    missing = [name for name in names if name not in payload]
+    if missing:
+        raise ProtocolError(f"missing required metric fields: {', '.join(missing)}", payload=payload)
+    values: list[int | None] = []
+    for name in names:
+        value = payload[name]
+        values.append(None if value is None else _nonnegative_int(value, name))
+    if any(value is None for value in values) and any(value is not None for value in values):
+        raise ProtocolError("statement_executed metrics must be all integers or all null", payload=payload)
+    return values[0], values[1], values[2], values[3]
+
+
 def _string(value: Any, name: str) -> str:
     if not isinstance(value, str):
         raise ProtocolError(f"{name} must be a string")
@@ -228,8 +257,11 @@ def _bool(value: Any, name: str) -> bool:
 
 def event_to_payload(event: Event) -> dict[str, Any]:
     payload = asdict(event)
-    payload = {key: value for key, value in payload.items() if value is not None}
-    return payload
+    # Execution metrics are an atomic nullable set: retain nulls so a receiver
+    # can distinguish an unavailable snapshot from an older/incomplete payload.
+    if isinstance(event, StatementExecuted):
+        return payload
+    return {key: value for key, value in payload.items() if value is not None}
 
 
 def frida_message_to_event(message: Mapping[str, Any]) -> Event:

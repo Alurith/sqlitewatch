@@ -23,4 +23,7 @@ successful instrumentation result. SQLiteWatch does not use binary fingerprintin
 to recover stripped symbols.
 
 The target uses only an in-memory database and prints the stable marker
-`name=Ada`; no database file is created.
+`name=Ada`; no database file is created. SQLiteWatch validates runtime metrics
+as semantic properties (non-negative complete values), not as cross-version
+benchmark totals. The stripped variant remains explicitly unsupported because
+`sqlite3_stmt_status` is not discoverable.

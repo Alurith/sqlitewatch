@@ -7,6 +7,13 @@ const SQLITE_BUSY = 5;
 const SQLITE_LOCKED = 6;
 const SQLITE_ROW = 100;
 const SQLITE_DONE = 101;
+const SQLITE_STMTSTATUS_FULLSCAN_STEP = 1;
+const SQLITE_STMTSTATUS_SORT = 2;
+const SQLITE_STMTSTATUS_AUTOINDEX = 3;
+const SQLITE_STMTSTATUS_VM_STEP = 4;
+// Passive observer only: sqlite3_stmt_status(..., 1) is forbidden because it
+// would reset counters owned by the target application.
+const SQLITE_STMTSTATUS_RESET_FLAG = 0;
 const defaultConfig = { max_sql_length: 65536 };
 const config = (typeof SQLITEWATCH_CONFIG === "object" && SQLITEWATCH_CONFIG) || defaultConfig;
 const maxSqlLength = Number(config.max_sql_length) > 0 ? Number(config.max_sql_length) : defaultConfig.max_sql_length;
@@ -150,18 +157,21 @@ function contextKey(statement) {
   return String(Process.id) + ":" + pointerString(statement);
 }
 
-function createContext(statement, database, module, sql, tid) {
+function createContext(statement, database, module, sql, tid, metricReader) {
   const context = {
     statement: pointerString(statement),
     database: pointerString(database),
     module: module,
     sql: sql,
     preparedTid: tid,
+    metricReader: metricReader,
+    lastMetrics: null,
     nextExecutionNumber: 0,
     activeExecutionNumber: null,
     lastStepRc: null
   };
   statementContexts.set(contextKey(statement), context);
+  context.lastMetrics = readMetricSnapshot(context, statement);
   return context;
 }
 
@@ -174,8 +184,59 @@ function removeContext(statement) {
   if (statement !== null && !statement.isNull()) statementContexts.delete(contextKey(statement));
 }
 
-function finishActiveExecution(context, tid, boundary) {
+function readMetricSnapshot(context, statement) {
+  if (context.metricReader === null) {
+    fail("stmt_status", "missing sqlite3_stmt_status reader for statement module", false);
+    return null;
+  }
+  try {
+    // All four calls are passive reads; SQLITE_STMTSTATUS_RESET_FLAG is always 0.
+    const snapshot = {
+      fullscan_steps: context.metricReader(statement, SQLITE_STMTSTATUS_FULLSCAN_STEP, SQLITE_STMTSTATUS_RESET_FLAG),
+      vm_steps: context.metricReader(statement, SQLITE_STMTSTATUS_VM_STEP, SQLITE_STMTSTATUS_RESET_FLAG),
+      sorts: context.metricReader(statement, SQLITE_STMTSTATUS_SORT, SQLITE_STMTSTATUS_RESET_FLAG),
+      autoindex: context.metricReader(statement, SQLITE_STMTSTATUS_AUTOINDEX, SQLITE_STMTSTATUS_RESET_FLAG)
+    };
+    const names = ["fullscan_steps", "vm_steps", "sorts", "autoindex"];
+    for (let i = 0; i < names.length; i++) {
+      const value = snapshot[names[i]];
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+        fail("stmt_status", "invalid " + names[i] + " value: " + String(value), false);
+        return null;
+      }
+    }
+    return snapshot;
+  } catch (error) {
+    fail("stmt_status", error, false);
+    return null;
+  }
+}
+
+function executionMetrics(context, statement) {
+  const current = readMetricSnapshot(context, statement);
+  const previous = context.lastMetrics;
+  // Always establish a fresh baseline, including after a failed/decreasing read.
+  context.lastMetrics = current;
+  if (current === null || previous === null) return null;
+  const metrics = {};
+  const names = ["fullscan_steps", "vm_steps", "sorts", "autoindex"];
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const delta = current[name] - previous[name];
+    if (!Number.isInteger(delta) || delta < 0) {
+      fail("stmt_status_delta", "counter decreased or overflowed: " + name, false);
+      return null;
+    }
+    metrics[name] = delta;
+  }
+  return metrics;
+}
+
+function finishActiveExecution(context, tid, boundary, metrics) {
   if (context.activeExecutionNumber === null) return false;
+  const values = metrics === null ? {
+    fullscan_steps: null, vm_steps: null, sorts: null, autoindex: null
+  } : metrics;
   event("statement_executed", {
     pid: Process.id,
     tid: tid,
@@ -184,14 +245,18 @@ function finishActiveExecution(context, tid, boundary) {
     database: context.database,
     execution_number: context.activeExecutionNumber,
     sqlite_rc: context.lastStepRc === null ? SQLITE_OK : context.lastStepRc,
-    boundary: boundary
+    boundary: boundary,
+    fullscan_steps: values.fullscan_steps,
+    vm_steps: values.vm_steps,
+    sorts: values.sorts,
+    autoindex: values.autoindex
   });
   context.activeExecutionNumber = null;
   context.lastStepRc = null;
   return true;
 }
 
-function installPrepare(module, address, abi) {
+function installPrepare(module, address, abi, metricReader) {
   return installHook(module, abi.name, address, {
     onEnter: function (args) {
       this.db = args[abi.db];
@@ -200,6 +265,7 @@ function installPrepare(module, address, abi) {
       this.ppStmt = args[abi.ppStmt];
       this.pzTail = args[abi.pzTail];
       this.module = moduleName(module);
+      this.metricReader = metricReader;
       this.tid = Process.getCurrentThreadId();
     },
     onLeave: function (retval) {
@@ -217,7 +283,7 @@ function installPrepare(module, address, abi) {
       }
       if (statement.isNull()) return;
       const captured = readSql(this.sqlPointer, this.nByte, this.pzTail);
-      createContext(statement, this.db, this.module, captured.sql, this.tid);
+      createContext(statement, this.db, this.module, captured.sql, this.tid, this.metricReader);
       event("statement_prepared", {
         pid: Process.id,
         tid: this.tid,
@@ -233,16 +299,16 @@ function installPrepare(module, address, abi) {
   });
 }
 
-function installPrepareV2(module, address) {
+function installPrepareV2(module, address, metricReader) {
   return installPrepare(module, address, {
     name: "sqlite3_prepare_v2", db: 0, sql: 1, nByte: 2, ppStmt: 3, pzTail: 4
-  });
+  }, metricReader);
 }
 
-function installPrepareV3(module, address) {
+function installPrepareV3(module, address, metricReader) {
   return installPrepare(module, address, {
     name: "sqlite3_prepare_v3", db: 0, sql: 1, nByte: 2, ppStmt: 4, pzTail: 5
-  });
+  }, metricReader);
 }
 
 function installStep(module, address) {
@@ -260,7 +326,8 @@ function installStep(module, address) {
       const rc = retval.toInt32();
       context.lastStepRc = rc;
       if (rc === SQLITE_ROW || rc === SQLITE_BUSY || rc === SQLITE_LOCKED) return;
-      finishActiveExecution(context, this.tid, rc === SQLITE_DONE ? "done" : "error");
+      const metrics = executionMetrics(context, this.statement);
+      finishActiveExecution(context, this.tid, rc === SQLITE_DONE ? "done" : "error", metrics);
     }
   });
 }
@@ -270,10 +337,12 @@ function installReset(module, address) {
     onEnter: function (args) {
       this.statement = args[0];
       this.tid = Process.getCurrentThreadId();
+      this.resetContext = lookupContext(this.statement);
+      this.metrics = this.resetContext !== null && this.resetContext.activeExecutionNumber !== null
+        ? executionMetrics(this.resetContext, this.statement) : null;
     },
     onLeave: function (_) {
-      const context = lookupContext(this.statement);
-      if (context !== null) finishActiveExecution(context, this.tid, "reset");
+      if (this.resetContext !== null) finishActiveExecution(this.resetContext, this.tid, "reset", this.metrics);
     }
   });
 }
@@ -284,12 +353,14 @@ function installFinalize(module, address) {
       this.statement = args[0];
       this.tid = Process.getCurrentThreadId();
       this.statementContext = lookupContext(this.statement);
+      this.metrics = this.statementContext !== null && this.statementContext.activeExecutionNumber !== null
+        ? executionMetrics(this.statementContext, this.statement) : null;
     },
     onLeave: function (retval) {
       try {
         const context = this.statementContext;
         if (context === null) return;
-        finishActiveExecution(context, this.tid, "finalize");
+        finishActiveExecution(context, this.tid, "finalize", this.metrics);
         event("statement_finalized", {
           pid: Process.id,
           tid: this.tid,
@@ -316,6 +387,18 @@ const HOOKS = {
 };
 const PREPARE_SYMBOLS = ["sqlite3_prepare_v2", "sqlite3_prepare_v3"];
 const LIFECYCLE_SYMBOLS = ["sqlite3_step", "sqlite3_reset", "sqlite3_finalize"];
+const METRIC_SYMBOLS = ["sqlite3_stmt_status"];
+
+function reportDetected(module, name, address) {
+  event("sqlite_detected", {
+    pid: Process.id,
+    module: moduleName(module),
+    path: module.path || "",
+    symbol: name,
+    address: pointerString(address),
+    linkage: linkageFor(module)
+  });
+}
 
 function installHook(module, name, address, handlers) {
   const key = pointerString(address);
@@ -326,14 +409,7 @@ function installHook(module, name, address, handlers) {
   try {
     Interceptor.attach(address, handlers);
     hookCount++;
-    event("sqlite_detected", {
-      pid: Process.id,
-      module: moduleName(module),
-      path: module.path || "",
-      symbol: name,
-      address: key,
-      linkage: linkageFor(module)
-    });
+    reportDetected(module, name, address);
     return true;
   } catch (error) {
     hookedAddresses.delete(key);
@@ -348,14 +424,28 @@ function inspectModule(module) {
   if (inspectedModules.has(key)) return;
   inspectedModules.add(key);
   const resolved = new Set();
-  for (const name in HOOKS) {
-    const address = findSymbol(module, name);
-    if (address !== null && HOOKS[name](module, address)) {
-      resolved.add(name);
+  let metricReader = null;
+  const metricAddress = findSymbol(module, "sqlite3_stmt_status");
+  if (metricAddress !== null) {
+    resolved.add("sqlite3_stmt_status");
+    reportDetected(module, "sqlite3_stmt_status", metricAddress);
+    try {
+      metricReader = new NativeFunction(metricAddress, "int", ["pointer", "int", "int"]);
+    } catch (error) {
+      fail("stmt_status", error, false);
     }
   }
+  for (const name in HOOKS) {
+    const address = findSymbol(module, name);
+    if (address === null) continue;
+    const installer = HOOKS[name];
+    const installed = name === "sqlite3_prepare_v2" || name === "sqlite3_prepare_v3"
+      ? installer(module, address, metricReader)
+      : installer(module, address);
+    if (installed) resolved.add(name);
+  }
   if (resolved.size > 0 || isSqliteCandidate(module)) {
-    moduleRecords.set(key, { module: module, symbols: resolved });
+    moduleRecords.set(key, { module: module, symbols: resolved, metricReader: metricReader });
   }
 }
 
@@ -363,7 +453,9 @@ function moduleReason(record) {
   const hasPrepare = PREPARE_SYMBOLS.some(function (name) { return record.symbols.has(name); });
   if (!hasPrepare) return "no prepare entrypoint";
   const missing = LIFECYCLE_SYMBOLS.filter(function (name) { return !record.symbols.has(name); });
-  return missing.length === 0 ? null : "missing lifecycle symbols: " + missing.join(", ");
+  if (missing.length > 0) return "missing lifecycle symbols: " + missing.join(", ");
+  if (!record.symbols.has("sqlite3_stmt_status")) return "missing metric symbol: sqlite3_stmt_status";
+  return null;
 }
 
 function currentStatus() {
@@ -374,7 +466,7 @@ function currentStatus() {
     const reasons = records.map(moduleReason).filter(function (reason) { return reason !== null; });
     return { status: "DETECTED_UNSUPPORTED", reason: reasons[0] || "no prepare entrypoint" };
   }
-  return { status: "NOT_DETECTED", reason: "SQLite lifecycle symbols not found in loaded modules" };
+  return { status: "NOT_DETECTED", reason: "SQLite lifecycle/metric symbols not found in loaded modules" };
 }
 
 function sendStatus() {

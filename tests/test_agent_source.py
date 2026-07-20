@@ -24,8 +24,13 @@ def test_agent_source_has_lifecycle_registry_and_modern_frida_api():
         "sqlite3_step",
         "sqlite3_reset",
         "sqlite3_finalize",
+        "sqlite3_stmt_status",
     ):
         assert symbol in source
+    assert "new NativeFunction" in source
+    assert "SQLITE_STMTSTATUS_RESET_FLAG = 0" in source
+    assert "resetFlag=1" not in source
+    assert 'installHook(module, "sqlite3_stmt_status"' not in source
     assert "embedded_or_unknown" in source
     assert "Module.findExportByName" not in source
     assert "Module.enumerateExports" not in source
@@ -44,3 +49,5 @@ def test_backend_uses_only_the_controller_buffer():
 def test_agent_source_parses_with_node():
     completed = subprocess.run(["node", "--check", str(AGENT)], cwd=ROOT)
     assert completed.returncode == 0
+    bootstrap = ROOT / "src" / "sqlitewatch" / "agent" / "launcher_bootstrap.js"
+    assert subprocess.run(["node", "--check", str(bootstrap)], cwd=ROOT).returncode == 0
