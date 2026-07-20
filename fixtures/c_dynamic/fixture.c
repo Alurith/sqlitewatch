@@ -12,6 +12,16 @@ static int check(int rc, sqlite3 *db, const char *where) {
     return 1;
 }
 
+static int run_select_cycle(sqlite3_stmt *stmt, int id) {
+    int rc = sqlite3_bind_int(stmt, 1, id);
+    if (rc != SQLITE_OK) return 0;
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW || strcmp((const char *)sqlite3_column_text(stmt, 0), "Ada") != 0) {
+        return 0;
+    }
+    return sqlite3_step(stmt) == SQLITE_DONE;
+}
+
 int main(int argc, char **argv) {
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
@@ -33,16 +43,24 @@ int main(int argc, char **argv) {
     stmt = NULL;
     if (rc != SQLITE_DONE) { result = 5; goto done; }
 
-    /* Explicit byte length exercises the nByte branch of the agent. */
+    /* Explicit nByte and two complete cycles make reset/reuse observable. */
     const char query[] = "SELECT name FROM users WHERE id = ?";
     rc = sqlite3_prepare_v2(db, query, (int)(sizeof(query) - 1), &stmt, NULL);
-    if (!check(rc, db, "prepare select")) { result = 6; goto done; }
-    sqlite3_bind_int(stmt, 1, 1);
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_ROW || strcmp((const char *)sqlite3_column_text(stmt, 0), "Ada") != 0) {
-        result = 7;
-    } else {
-        printf("name=Ada\n");
+    if (!check(rc, db, "prepare reused select")) { result = 6; goto done; }
+    if (!run_select_cycle(stmt, 1)) { result = 7; goto done; }
+    rc = sqlite3_reset(stmt);
+    if (rc != SQLITE_OK) { result = 8; goto done; }
+    if (!run_select_cycle(stmt, 1)) { result = 9; goto done; }
+    printf("name=Ada\n");
+    rc = sqlite3_finalize(stmt);
+    stmt = NULL;
+    if (rc != SQLITE_OK) { result = 10; goto done; }
+
+    /* prepare_v3 has a distinct ABI and must be observed directly. */
+    rc = sqlite3_prepare_v3(db, "SELECT 42", -1, 0, &stmt, NULL);
+    if (!check(rc, db, "prepare v3")) { result = 11; goto done; }
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 0) != 42) {
+        result = 12; goto done;
     }
     sqlite3_finalize(stmt);
     stmt = NULL;
@@ -58,7 +76,6 @@ int main(int argc, char **argv) {
 done:
     if (stmt != NULL) sqlite3_finalize(stmt);
     if (db != NULL) sqlite3_close(db);
-    /* Give the controller's waitpid path time to arm on local Frida. */
     usleep(100000);
     return result;
 }

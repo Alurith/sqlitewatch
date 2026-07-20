@@ -14,6 +14,8 @@ from ..events import (
     InstrumentationStatus,
     ProcessExited,
     SqliteDetected,
+    StatementExecuted,
+    StatementFinalized,
     StatementPrepared,
 )
 
@@ -23,6 +25,8 @@ _TYPES = {
     "sqlite_detected",
     "instrumentation_status",
     "statement_prepared",
+    "statement_executed",
+    "statement_finalized",
     "instrumentation_error",
     "process_exited",
 }
@@ -31,6 +35,8 @@ _ALLOWED_FIELDS = {
     "sqlite_detected": {"type", "protocol_version", "pid", "module", "path", "symbol", "address", "linkage"},
     "instrumentation_status": {"type", "protocol_version", "status", "pid", "hooks", "reason"},
     "statement_prepared": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "sql", "sqlite_rc", "sql_truncated", "captured_bytes"},
+    "statement_executed": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "execution_number", "sqlite_rc", "boundary"},
+    "statement_finalized": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "executions", "sqlite_rc"},
     "instrumentation_error": {"type", "protocol_version", "phase", "message", "pid", "fatal", "sqlite_rc"},
     "process_exited": {"type", "protocol_version", "pid", "exit_code", "signal"},
 }
@@ -139,6 +145,32 @@ def payload_to_event(payload: Any) -> Event:
             sqlite_rc=_integer(data.get("sqlite_rc", 0), "sqlite_rc"),
             sql_truncated=_bool(data.get("sql_truncated", False), "sql_truncated"),
             captured_bytes=captured,
+        )
+    if event_type == "statement_executed":
+        _required(data, "pid", "tid", "module", "statement", "database", "execution_number", "sqlite_rc", "boundary")
+        boundary = _string(data["boundary"], "boundary")
+        if boundary not in {"done", "error", "reset", "finalize"}:
+            raise ProtocolError(f"unknown execution boundary: {boundary!r}")
+        return StatementExecuted(
+            pid=_positive_int(data["pid"], "pid"),
+            tid=_positive_int(data["tid"], "tid"),
+            module=_string(data["module"], "module"),
+            statement=_pointer(data["statement"], "statement"),
+            database=_pointer(data["database"], "database"),
+            execution_number=_positive_int(data["execution_number"], "execution_number"),
+            sqlite_rc=_integer(data["sqlite_rc"], "sqlite_rc"),
+            boundary=boundary,
+        )
+    if event_type == "statement_finalized":
+        _required(data, "pid", "tid", "module", "statement", "database", "executions", "sqlite_rc")
+        return StatementFinalized(
+            pid=_positive_int(data["pid"], "pid"),
+            tid=_positive_int(data["tid"], "tid"),
+            module=_string(data["module"], "module"),
+            statement=_pointer(data["statement"], "statement"),
+            database=_pointer(data["database"], "database"),
+            executions=_nonnegative_int(data["executions"], "executions"),
+            sqlite_rc=_integer(data["sqlite_rc"], "sqlite_rc"),
         )
     if event_type == "instrumentation_error":
         _required(data, "phase", "message")

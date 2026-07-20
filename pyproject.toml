@@ -22,6 +22,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sqlitewatch"]
+force-include = { "src/sqlitewatch/agent/sqlitewatch_agent.js" = "sqlitewatch/agent/sqlitewatch_agent.js" }
 
 [tool.pytest.ini_options]
 markers = [

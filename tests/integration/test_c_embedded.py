@@ -48,6 +48,8 @@ def test_embedded_fixture_and_stripped_limit(embedded_tools_available):
     )
     assert record.status == "PASS", record.diagnostic()
     assert record.linkage == "embedded_or_unknown"
+    assert record.lifecycle_active
+    assert record.executions_observed and record.finalizations_observed
 
     subprocess.run(["make", "-C", str(FIXTURE_DIR), "stripped"], check=True)
     stripped_command = (str(STRIPPED),)

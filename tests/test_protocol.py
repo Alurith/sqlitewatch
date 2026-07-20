@@ -1,3 +1,5 @@
+import pytest
+
 from sqlitewatch.events import InstrumentationError, ProcessExited
 from sqlitewatch.instrumentation.protocol import ProtocolError, frida_message_to_event, payload_to_event
 
@@ -19,16 +21,40 @@ def test_frida_error_is_not_no_activity():
 
 
 def test_protocol_version_and_ids_are_validated():
-    payload = {"type": "backend_ready", "protocol_version": 2, "pid": 1}
-    try:
-        payload_to_event(payload)
-    except ProtocolError:
-        pass
-    else:
-        raise AssertionError("unsupported protocol version accepted")
-    try:
+    with pytest.raises(ProtocolError):
+        payload_to_event({"type": "backend_ready", "protocol_version": 2, "pid": 1})
+    with pytest.raises(ProtocolError):
         payload_to_event({"type": "backend_ready", "protocol_version": 1, "pid": 0})
-    except ProtocolError:
-        pass
-    else:
-        raise AssertionError("invalid pid accepted")
+
+
+@pytest.mark.parametrize("payload, message", [
+    ({"type": "statement_executed", "protocol_version": 1}, "missing required fields"),
+    ({
+        "type": "statement_executed", "protocol_version": 1, "pid": 1, "tid": 1,
+        "module": "x", "statement": "0x1", "database": "0x2", "execution_number": 0,
+        "sqlite_rc": 101, "boundary": "done",
+    }, "execution_number"),
+    ({
+        "type": "statement_executed", "protocol_version": 1, "pid": 1, "tid": 1,
+        "module": "x", "statement": "0x1", "database": "0x2", "execution_number": 1,
+        "sqlite_rc": 101, "boundary": "unknown",
+    }, "boundary"),
+    ({
+        "type": "statement_finalized", "protocol_version": 1, "pid": 1, "tid": 1,
+        "module": "x", "statement": "1", "database": "0x2", "executions": 0,
+        "sqlite_rc": 0,
+    }, "statement"),
+])
+def test_invalid_lifecycle_payloads_are_rejected(payload, message):
+    with pytest.raises(ProtocolError, match=message):
+        payload_to_event(payload)
+
+
+def test_lifecycle_rejects_unknown_fields():
+    payload = {
+        "type": "statement_finalized", "protocol_version": 1, "pid": 1, "tid": 1,
+        "module": "x", "statement": "0x1", "database": "0x2", "executions": 0,
+        "sqlite_rc": 0, "unexpected": True,
+    }
+    with pytest.raises(ProtocolError, match="unknown fields"):
+        payload_to_event(payload)

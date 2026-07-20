@@ -118,4 +118,6 @@ def test_node_binding_is_optional_and_matrix_classified(node_tools_available):
     else:
         assert record.status == "PASS", record.diagnostic()
         assert record.sql_captured
+        assert record.prepared_v3
+        assert record.executions_observed and record.finalizations_observed
         assert record.module and record.path

@@ -57,4 +57,5 @@ def test_python_stdlib_sqlite_is_instrumented(native_tools_available):
         assert record.status == "PASS", record.diagnostic()
         assert record.module and record.path
         assert record.linkage in {"dynamic", "embedded_or_unknown"}
-        assert record.symbols_found == ("sqlite3_prepare_v2",)
+        assert record.lifecycle_active
+        assert record.executions_observed

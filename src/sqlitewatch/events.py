@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 PROTOCOL_VERSION = 1
 InstrumentationState = str
@@ -56,6 +56,33 @@ class StatementPrepared:
 
 
 @dataclass(frozen=True, slots=True)
+class StatementExecuted:
+    pid: int
+    tid: int
+    module: str
+    statement: str
+    database: str
+    execution_number: int
+    sqlite_rc: int
+    boundary: Literal["done", "error", "reset", "finalize"]
+    protocol_version: int = PROTOCOL_VERSION
+    type: str = field(default="statement_executed", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class StatementFinalized:
+    pid: int
+    tid: int
+    module: str
+    statement: str
+    database: str
+    executions: int
+    sqlite_rc: int
+    protocol_version: int = PROTOCOL_VERSION
+    type: str = field(default="statement_finalized", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class InstrumentationError:
     phase: str
     message: str
@@ -80,6 +107,8 @@ Event: TypeAlias = (
     | SqliteDetected
     | InstrumentationStatus
     | StatementPrepared
+    | StatementExecuted
+    | StatementFinalized
     | InstrumentationError
     | ProcessExited
 )
@@ -106,7 +135,16 @@ class RunResult:
 
     @property
     def statements(self) -> tuple[StatementPrepared, ...]:
+        """Prepared statements, retained as the Phase 0–2 compatibility alias."""
         return tuple(event for event in self.events if isinstance(event, StatementPrepared))
+
+    @property
+    def executions(self) -> tuple[StatementExecuted, ...]:
+        return tuple(event for event in self.events if isinstance(event, StatementExecuted))
+
+    @property
+    def finalized_statements(self) -> tuple[StatementFinalized, ...]:
+        return tuple(event for event in self.events if isinstance(event, StatementFinalized))
 
     def as_dict(self) -> dict[str, Any]:
         from .instrumentation.protocol import event_to_payload

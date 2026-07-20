@@ -1,8 +1,4 @@
-"""Shared validation records for the Phase 2 integration matrix.
-
-This module intentionally lives under ``tests``: the matrix is a validation
-contract, not part of SQLiteWatch's production event protocol.
-"""
+"""Shared lifecycle validation records for the integration matrix."""
 
 from __future__ import annotations
 
@@ -18,7 +14,9 @@ from sqlitewatch.events import (
     StatementPrepared,
 )
 
-REQUIRED_SYMBOLS = ("sqlite3_prepare_v2",)
+PREPARE_SYMBOLS = ("sqlite3_prepare_v2", "sqlite3_prepare_v3")
+LIFECYCLE_SYMBOLS = ("sqlite3_step", "sqlite3_reset", "sqlite3_finalize")
+REQUIRED_SYMBOLS = PREPARE_SYMBOLS + LIFECYCLE_SYMBOLS
 MatrixStatus = Literal["PASS", "SKIPPED", "UNSUPPORTED", "FAIL"]
 
 
@@ -35,12 +33,16 @@ class MatrixRecord:
     required_symbols: tuple[str, ...]
     symbols_found: tuple[str, ...]
     hook_installed: bool
+    lifecycle_active: bool
+    prepared_v2: bool
+    prepared_v3: bool
+    executions_observed: bool
+    finalizations_observed: bool
     sql_captured: bool
     functional_output_ok: bool
     reason: str | None = None
 
     def diagnostic(self) -> str:
-        """Return a compact, complete record suitable for pytest assertions."""
         return json.dumps(asdict(self), sort_keys=True, default=list)
 
 
@@ -49,14 +51,20 @@ def _unique(values: Sequence[str]) -> tuple[str, ...]:
 
 
 def _reason_from_result(result: RunResult) -> str | None:
-    errors = [
-        event.message
-        for event in result.events
-        if isinstance(event, InstrumentationError)
-    ]
+    errors = [event.message for event in result.events if isinstance(event, InstrumentationError)]
     if result.instrumentation_error:
         errors.insert(0, result.instrumentation_error)
     return "; ".join(_unique(errors)) or None
+
+
+def _lifecycle_active(detections: Sequence[SqliteDetected]) -> bool:
+    symbols_by_module: dict[str, set[str]] = {}
+    for event in detections:
+        symbols_by_module.setdefault(event.module, set()).add(event.symbol)
+    return any(
+        bool(symbols.intersection(PREPARE_SYMBOLS)) and set(LIFECYCLE_SYMBOLS).issubset(symbols)
+        for symbols in symbols_by_module.values()
+    )
 
 
 def build_matrix_record(
@@ -68,106 +76,82 @@ def build_matrix_record(
     functional_output_ok: bool = False,
     skip_reason: str | None = None,
 ) -> MatrixRecord:
-    """Build and classify one scenario from a controller result.
-
-    ``skip_reason`` represents a prerequisite that was unavailable before the
-    target validation started.  A result with an explicit
-    ``DETECTED_UNSUPPORTED`` status is deliberately not treated as a skip.
-    """
-
+    """Build and classify one scenario without allowing lifecycle-free PASSes."""
     command_tuple = tuple(str(part) for part in command)
     if result is None:
         if not skip_reason:
             raise ValueError("result is required unless skip_reason is provided")
         return MatrixRecord(
-            scenario=scenario,
-            status="SKIPPED",
-            command=command_tuple,
-            target_exit_code=None,
-            sqlite_detected=False,
-            module=None,
-            path=None,
-            linkage=None,
-            required_symbols=REQUIRED_SYMBOLS,
-            symbols_found=(),
-            hook_installed=False,
-            sql_captured=False,
-            functional_output_ok=False,
-            reason=skip_reason,
+            scenario=scenario, status="SKIPPED", command=command_tuple, target_exit_code=None,
+            sqlite_detected=False, module=None, path=None, linkage=None,
+            required_symbols=REQUIRED_SYMBOLS, symbols_found=(), hook_installed=False,
+            lifecycle_active=False, prepared_v2=False, prepared_v3=False,
+            executions_observed=False, finalizations_observed=False, sql_captured=False,
+            functional_output_ok=False, reason=skip_reason,
         )
 
     detections = [event for event in result.events if isinstance(event, SqliteDetected)]
-    statuses = [
-        event for event in result.events if isinstance(event, InstrumentationStatus)
-    ]
+    statuses = [event for event in result.events if isinstance(event, InstrumentationStatus)]
     statements = [event for event in result.events if isinstance(event, StatementPrepared)]
     symbols_found = _unique([event.symbol for event in detections])
-    expected = ({expected_sql} if isinstance(expected_sql, str) else set(expected_sql or ()))
+    expected = {expected_sql} if isinstance(expected_sql, str) else set(expected_sql or ())
     sql_captured = bool(expected) and any(event.sql in expected for event in statements)
+    lifecycle_active = _lifecycle_active(detections)
     hook_installed = any(event.status == "ACTIVE" and event.hooks > 0 for event in statuses)
+    executions_observed = bool(result.executions)
+    finalizations_observed = bool(result.finalized_statements)
     unsupported = (
-        not hook_installed
-        and (
-            result.instrumentation_status == "DETECTED_UNSUPPORTED"
-            or any(event.status == "DETECTED_UNSUPPORTED" for event in statuses)
-        )
+        not lifecycle_active
+        and (result.instrumentation_status == "DETECTED_UNSUPPORTED" or any(
+            event.status == "DETECTED_UNSUPPORTED" for event in statuses
+        ))
     )
     target_failed = result.target_exit_code not in (None, 0) or result.signal is not None
     reason = _reason_from_result(result)
 
     if unsupported:
         status: MatrixStatus = "UNSUPPORTED"
-        reason = reason or "sqlite3_prepare_v2 was detected as unavailable"
+        reason = reason or "SQLite lifecycle symbols are unavailable"
     elif result.instrumentation_failed or target_failed:
         status = "FAIL"
-        reason = reason or (
-            f"target exited with code {result.target_exit_code}"
-            if target_failed
-            else "instrumentation failed"
-        )
-    elif (
-        bool(detections)
-        and bool(symbols_found)
-        and hook_installed
-        and sql_captured
-        and functional_output_ok
-    ):
+        reason = reason or (f"target exited with code {result.target_exit_code}" if target_failed else "instrumentation failed")
+    elif (bool(detections) and lifecycle_active and hook_installed and sql_captured
+          and executions_observed and finalizations_observed and functional_output_ok):
         status = "PASS"
     else:
         status = "FAIL"
         missing = []
         if not detections:
             missing.append("SQLite detection")
-        if not symbols_found:
-            missing.append("required symbol")
+        if not lifecycle_active:
+            missing.append("complete lifecycle hooks")
         if not hook_installed:
             missing.append("active hook")
         if not sql_captured:
             missing.append("expected SQL")
+        if not executions_observed:
+            missing.append("statement execution")
+        if not finalizations_observed:
+            missing.append("statement finalization")
         if not functional_output_ok:
             missing.append("functional output")
         reason = reason or "missing " + ", ".join(missing)
 
     statement_modules = {event.module for event in statements}
-    first_detection = next(
-        (event for event in detections if event.module in statement_modules),
-        detections[0] if detections else None,
-    )
+    first_detection = next((event for event in detections if event.module in statement_modules), detections[0] if detections else None)
     return MatrixRecord(
-        scenario=scenario,
-        status=status,
-        command=command_tuple,
-        target_exit_code=result.target_exit_code,
-        sqlite_detected=bool(detections),
+        scenario=scenario, status=status, command=command_tuple,
+        target_exit_code=result.target_exit_code, sqlite_detected=bool(detections),
         module=first_detection.module if first_detection else None,
         path=first_detection.path if first_detection else None,
         linkage=first_detection.linkage if first_detection else None,
-        required_symbols=REQUIRED_SYMBOLS,
-        symbols_found=symbols_found,
-        hook_installed=hook_installed,
-        sql_captured=sql_captured,
-        functional_output_ok=functional_output_ok,
-        reason=reason,
+        required_symbols=REQUIRED_SYMBOLS, symbols_found=symbols_found,
+        hook_installed=hook_installed, lifecycle_active=lifecycle_active,
+        prepared_v2="sqlite3_prepare_v2" in symbols_found,
+        prepared_v3="sqlite3_prepare_v3" in symbols_found,
+        executions_observed=executions_observed,
+        finalizations_observed=finalizations_observed,
+        sql_captured=sql_captured, functional_output_ok=functional_output_ok, reason=reason,
     )
 
 
@@ -176,9 +160,6 @@ def assert_matrix_pass(record: MatrixRecord) -> None:
 
 
 __all__ = [
-    "MatrixRecord",
-    "MatrixStatus",
-    "REQUIRED_SYMBOLS",
-    "assert_matrix_pass",
-    "build_matrix_record",
+    "LIFECYCLE_SYMBOLS", "MatrixRecord", "MatrixStatus", "PREPARE_SYMBOLS", "REQUIRED_SYMBOLS",
+    "assert_matrix_pass", "build_matrix_record",
 ]

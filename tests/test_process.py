@@ -1,6 +1,12 @@
 import os
 
-from sqlitewatch.events import BackendReady, InstrumentationStatus, StatementPrepared
+from sqlitewatch.events import (
+    BackendReady,
+    InstrumentationStatus,
+    StatementExecuted,
+    StatementFinalized,
+    StatementPrepared,
+)
 from sqlitewatch.process import ControllerConfig, ProcessController
 
 
@@ -31,8 +37,11 @@ class FakeBackend:
         self.calls.append("load")
         if self.fail_load:
             raise RuntimeError("intentional load error")
-        self.callback(InstrumentationStatus(pid=1234, status="ACTIVE", hooks=1))
+        self.callback(InstrumentationStatus(pid=1234, status="ACTIVE", hooks=5))
         self.callback(BackendReady(pid=1234))
+        self.callback(StatementPrepared(1234, 7, "sqlite", "0x1", "0x2", "SELECT 1"))
+        self.callback(StatementExecuted(1234, 7, "sqlite", "0x1", "0x2", 1, 101, "done"))
+        self.callback(StatementFinalized(1234, 7, "sqlite", "0x1", "0x2", 1, 0))
 
     def resume(self, pid):
         self.calls.append(("resume", pid))
@@ -54,6 +63,15 @@ def test_resume_follows_load_and_backend_ready():
     assert names.index("load") < names.index("resume") < names.index("waitpid")
     assert result.target_exit_code == 0
     assert not result.instrumentation_failed
+    lifecycle = [
+        event for event in result.events
+        if isinstance(event, (StatementPrepared, StatementExecuted, StatementFinalized))
+    ]
+    assert [type(event) for event in lifecycle] == [
+        StatementPrepared, StatementExecuted, StatementFinalized,
+    ]
+    assert result.executions[0].boundary == "done"
+    assert result.finalized_statements[0].executions == 1
 
 
 def test_load_failure_is_instrumentation_failure_and_cleanup_runs():

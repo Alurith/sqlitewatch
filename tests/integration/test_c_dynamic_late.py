@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from sqlitewatch.events import StatementExecuted, StatementFinalized
 from sqlitewatch.process import ProcessController
 from tests.integration.matrix_support import build_matrix_record
 
@@ -36,6 +37,8 @@ def test_late_loaded_sqlite_is_observed(native_tools_available):
     assert result.target_exit_code == 0
     assert any(event.sql == SQL for event in result.statements)
     assert len(result.statements) == len({(event.statement, event.sql) for event in result.statements})
+    assert any(isinstance(event, StatementExecuted) for event in result.events)
+    assert any(isinstance(event, StatementFinalized) for event in result.events)
     assert normal.stdout in instrumented.stdout
 
     record = build_matrix_record(
@@ -46,3 +49,4 @@ def test_late_loaded_sqlite_is_observed(native_tools_available):
         functional_output_ok=normal.stdout in instrumented.stdout,
     )
     assert record.status == "PASS", record.diagnostic()
+    assert record.lifecycle_active

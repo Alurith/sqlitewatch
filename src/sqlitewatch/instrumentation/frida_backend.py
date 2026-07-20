@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from queue import Queue
 from threading import Lock
 from typing import Any, Callable
 
@@ -33,7 +32,6 @@ class FridaBackend:
         self.device: Any = None
         self.session: Any = None
         self.script: Any = None
-        self._events: Queue[Event] = Queue()
         self._callback: Callable[[Event], None] | None = None
         self._lock = Lock()
         self.detached_reason: str | None = None
@@ -41,15 +39,10 @@ class FridaBackend:
 
     @staticmethod
     def _find_agent() -> Path:
-        candidates = [
-            Path(__file__).resolve().parents[3] / "agent" / "sqlitewatch_agent.js",
-            Path(__file__).resolve().parent.parent / "agent" / "sqlitewatch_agent.js",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-        searched = ", ".join(str(path) for path in candidates)
-        raise FileNotFoundError(f"sqlitewatch_agent.js not found; searched: {searched}")
+        agent = Path(__file__).resolve().parent.parent / "agent" / "sqlitewatch_agent.js"
+        if agent.is_file():
+            return agent
+        raise FileNotFoundError(f"package-local sqlitewatch agent not found: {agent}")
 
     def get_local_device(self) -> Any:
         self.device = self.frida.get_local_device()
@@ -98,7 +91,6 @@ class FridaBackend:
             event = frida_message_to_event(message)
         except ProtocolError as exc:
             event = InstrumentationError(phase="protocol", message=str(exc), fatal=True)
-        self._events.put(event)
         callback = self._callback
         if callback is not None:
             callback(event)

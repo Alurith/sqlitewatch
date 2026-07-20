@@ -17,20 +17,15 @@ setTimeout(() => {
       { id: 2, name: "Grace" },
     ]);
 
-    const selected = database
-      .prepare("SELECT name FROM users WHERE id = ?")
-      .all(1);
-    const sorted = database
-      .prepare("SELECT name FROM users ORDER BY name")
-      .all();
-    // better-sqlite3 uses prepare_v3 for Database#prepare. Keep equivalent
-    // prepare_v2 paths as well because this phase intentionally hooks only
-    // sqlite3_prepare_v2. sqlite3_exec prepares the marker query with an
-    // unbound value; the real bound query above remains the functional gate.
-    database.exec("SELECT name FROM users WHERE id = ?");
-    database.exec("SELECT name FROM users ORDER BY name");
+    // Database#prepare uses sqlite3_prepare_v3. Reusing this statement proves
+    // two lifecycle executions without legacy exec() coverage queries.
+    const selectedStatement = database.prepare("SELECT name FROM users WHERE id = ?");
+    const selected = selectedStatement.all(1);
+    const selectedAgain = selectedStatement.all(1);
+    const sorted = database.prepare("SELECT name FROM users ORDER BY name").all();
     if (selected.length !== 1 || selected[0].name !== "Ada") process.exitCode = 2;
-    if (sorted.map((row) => row.name).join(",") !== "Ada,Grace") process.exitCode = 3;
+    if (selectedAgain.length !== 1 || selectedAgain[0].name !== "Ada") process.exitCode = 3;
+    if (sorted.map((row) => row.name).join(",") !== "Ada,Grace") process.exitCode = 4;
     console.log("names=" + sorted.map((row) => row.name).join(","));
     database.close();
   } catch (error) {

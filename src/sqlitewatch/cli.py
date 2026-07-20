@@ -5,7 +5,13 @@ from __future__ import annotations
 import sys
 from typing import Sequence
 
-from .events import InstrumentationError, SqliteDetected, StatementPrepared
+from .events import (
+    InstrumentationError,
+    SqliteDetected,
+    StatementExecuted,
+    StatementFinalized,
+    StatementPrepared,
+)
 from .process import ControllerConfig, ProcessController
 
 _USAGE = "usage: sqlitewatch [--max-sql-length N] -- <command> [args...]"
@@ -67,6 +73,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[{result.instrumentation_status}] SQLite detected in {event.module}")
         elif isinstance(event, StatementPrepared):
             print(f"[statement_prepared] {event.sql}")
+        elif isinstance(event, StatementExecuted):
+            print(
+                f"[statement_executed] {event.statement} execution={event.execution_number} "
+                f"rc={event.sqlite_rc} boundary={event.boundary}"
+            )
+        elif isinstance(event, StatementFinalized):
+            print(
+                f"[statement_finalized] {event.statement} executions={event.executions} "
+                f"rc={event.sqlite_rc}"
+            )
         elif isinstance(event, InstrumentationError):
             print(f"[instrumentation_error] {event.phase}: {event.message}", file=sys.stderr)
     if result.target_exit_code is not None:
