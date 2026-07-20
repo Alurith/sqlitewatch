@@ -158,10 +158,10 @@ class FridaBackend:
             raise RuntimeError("device is not initialized")
         self.device.resume(pid)
 
-    def terminate_launcher(self, pid: int) -> None:
+    def terminate_launcher(self, pid: int, signum: int = signal.SIGTERM) -> None:
         """Request graceful launcher cleanup without claiming its wait status."""
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.kill(pid, signum)
         except ProcessLookupError:
             pass
 

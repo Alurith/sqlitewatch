@@ -7,6 +7,7 @@ import json
 import os
 from queue import Empty, Queue
 import socket
+import signal as signal_module
 import sys
 from tempfile import TemporaryDirectory
 import time
@@ -115,6 +116,20 @@ class ProcessController:
                         listener, target_pid, config.completion_timeout
                     )
                     self._drain_queue_until_quiet()
+                except KeyboardInterrupt:
+                    # Ctrl-C is a normal target interruption, not an excuse to
+                    # detach and orphan the launcher-owned Django process.
+                    if launcher_pid is not None:
+                        self._abort_launcher(launcher_pid, signal_module.SIGINT)
+                    if target_pid is not None:
+                        try:
+                            target_exit, target_signal = self._receive_completion(
+                                listener, target_pid, min(config.completion_timeout, 5.0)
+                            )
+                        except Exception as exc:
+                            self._fail("interrupt_cleanup", str(exc))
+                    else:
+                        self._fail("interrupt_cleanup", "target was not started")
                 except Exception as exc:
                     if not self._instrumentation_failed:
                         self._fail("controller", str(exc))
@@ -297,10 +312,10 @@ class ProcessController:
             raise RuntimeError("launcher completion record must contain exactly one valid exit status")
         return exit_code, signal
 
-    def _abort_launcher(self, pid: int) -> None:
+    def _abort_launcher(self, pid: int, signum: int = signal_module.SIGTERM) -> None:
         try:
             if hasattr(self.backend, "terminate_launcher"):
-                self.backend.terminate_launcher(pid)
+                self.backend.terminate_launcher(pid, signum)
         except Exception:
             # Cleanup must not mask the original protocol or instrumentation error.
             pass

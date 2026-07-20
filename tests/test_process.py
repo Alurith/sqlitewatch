@@ -20,7 +20,7 @@ class Child:
 
 
 class FakeBackend:
-    def __init__(self, *, completion=None, child=Child(), fail_load=False, emit_child=True):
+    def __init__(self, *, completion=None, child=Child(), fail_load=False, emit_child=True, interrupt_target=False):
         self.calls = []
         self.launcher_callback = None
         self.target_callback = None
@@ -29,6 +29,7 @@ class FakeBackend:
         self.child = child
         self.fail_load = fail_load
         self.emit_child = emit_child
+        self.interrupt_target = interrupt_target
         self.socket_path = None
 
     def get_local_device(self): self.calls.append("device")
@@ -73,8 +74,10 @@ class FakeBackend:
                     client.sendall(self.completion)
                 else:
                     client.sendall((json.dumps(self.completion) + "\n").encode())
+            if self.interrupt_target:
+                raise KeyboardInterrupt
 
-    def terminate_launcher(self, pid): self.calls.append(("terminate_launcher", pid))
+    def terminate_launcher(self, pid, signum=None): self.calls.append(("terminate_launcher", pid, signum))
     def detach(self): self.calls.append("detach")
 
 
@@ -115,7 +118,7 @@ def test_invalid_socket_completion_fails_instrumentation(completion):
     result = ProcessController(backend).run(["target"], ControllerConfig(backend_ready_timeout=0.1, launcher_ready_timeout=0.1))
     assert result.instrumentation_failed
     assert result.instrumentation_status == "FAILED"
-    assert ("terminate_launcher", 1234) in backend.calls
+    assert any(call[:2] == ("terminate_launcher", 1234) for call in backend.calls)
 
 
 def test_unexpected_child_fails_instrumentation():
@@ -123,6 +126,16 @@ def test_unexpected_child_fails_instrumentation():
     result = ProcessController(FakeBackend(child=child)).run(["target"], ControllerConfig(backend_ready_timeout=0.1, launcher_ready_timeout=0.1))
     assert result.instrumentation_failed
     assert "child_gating" in (result.instrumentation_error or "")
+
+
+def test_ctrl_c_forwards_signal_and_reaps_launcher_target():
+    backend = FakeBackend(
+        completion={"pid": 5678, "exit_code": None, "signal": 2}, interrupt_target=True
+    )
+    result = ProcessController(backend).run(["target"], ControllerConfig(backend_ready_timeout=0.1, launcher_ready_timeout=0.1))
+    assert result.signal == 2
+    assert not result.instrumentation_failed
+    assert ("terminate_launcher", 1234, 2) in backend.calls
 
 
 def test_child_gating_timeout_fails_instrumentation():
