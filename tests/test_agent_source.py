@@ -16,6 +16,8 @@ def test_agent_source_has_lifecycle_registry_and_modern_frida_api():
     assert "Interceptor.attach" in source
     assert "findSymbol(module, name)" in source
     assert "const HOOKS" in source
+    assert "inspectModule(module, false)" in source
+    assert "inspectModule(modules[i], true)" in source
     assert "hookedAddresses" in source
     assert "hookedSymbolNames" in source
     for symbol in (

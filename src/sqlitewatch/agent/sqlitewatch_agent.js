@@ -419,7 +419,12 @@ function installHook(module, name, address, handlers) {
   }
 }
 
-function inspectModule(module) {
+function inspectModule(module, allowUnknown) {
+  // Frida can crash a target while enumerateSymbols() scans arbitrary native
+  // modules from an onAdded callback. The startup scan still covers embedded
+  // SQLite in any already-loaded module; late loads are restricted to modules
+  // whose own name/path identifies them as SQLite candidates.
+  if (!allowUnknown && !isSqliteCandidate(module)) return;
   const key = moduleKey(module);
   if (inspectedModules.has(key)) return;
   inspectedModules.add(key);
@@ -489,7 +494,7 @@ function start() {
   try {
     observer = Process.attachModuleObserver({
       onAdded: function (module) {
-        inspectModule(module);
+        inspectModule(module, false);
         if (statusSent) sendStatus();
       },
       onRemoved: function (module) {
@@ -498,7 +503,7 @@ function start() {
       }
     });
     const modules = Process.enumerateModules();
-    for (let i = 0; i < modules.length; i++) inspectModule(modules[i]);
+    for (let i = 0; i < modules.length; i++) inspectModule(modules[i], true);
     sendStatus();
     event("backend_ready", { pid: Process.id, arch: Process.arch, platform: Process.platform });
   } catch (error) {
