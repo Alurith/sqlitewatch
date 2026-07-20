@@ -96,8 +96,11 @@ class ProcessController:
                 if getattr(backend, "prearm_wait", False):
                     wait_gate.set()
                     # Ensure the OS wait is actually armed before Frida can
-                    # resume and reap a short-lived target.
+                    # resume and reap a short-lived target.  The worker sets
+                    # its marker immediately before entering the syscall, so
+                    # leave a small scheduling window for that syscall.
                     wait_started.wait()
+                    time.sleep(1.0)
                 backend.resume(pid)
                 resumed = True
                 if not getattr(backend, "prearm_wait", False):
@@ -106,6 +109,10 @@ class ProcessController:
                 if outcome == "error":
                     raise value
                 target_exit, target_signal = value
+                # Frida delivers send() messages asynchronously. Keep the
+                # script attached briefly after waitpid so short-lived
+                # targets cannot lose tail events.
+                self._drain_queue_until_quiet()
         except Exception as exc:
             self._fail("controller", str(exc))
             if wait_gate is not None:
@@ -149,20 +156,32 @@ class ProcessController:
     def _on_event(self, event: Event) -> None:
         self._queue.put(event)
 
+    def _record_event(self, event: Event) -> None:
+        self._events.append(event)
+        if isinstance(event, BackendReady):
+            self._backend_ready = True
+        elif isinstance(event, InstrumentationError):
+            if event.fatal:
+                self._fail(event.phase, event.message)
+        elif isinstance(event, InstrumentationStatus) and event.status == "FAILED":
+            self._fail("instrumentation", event.reason or "agent reported FAILED")
+
     def _drain_queue(self) -> None:
         while True:
             try:
                 event = self._queue.get_nowait()
             except Empty:
                 return
-            self._events.append(event)
-            if isinstance(event, BackendReady):
-                self._backend_ready = True
-            elif isinstance(event, InstrumentationError):
-                if event.fatal:
-                    self._fail(event.phase, event.message)
-            elif isinstance(event, InstrumentationStatus) and event.status == "FAILED":
-                self._fail("instrumentation", event.reason or "agent reported FAILED")
+            self._record_event(event)
+
+    def _drain_queue_until_quiet(self, timeout: float = 0.25) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                event = self._queue.get(timeout=min(0.02, deadline - time.monotonic()))
+            except Empty:
+                continue
+            self._record_event(event)
 
     def _wait_for_backend_ready(self, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -174,21 +193,18 @@ class ProcessController:
                 event = self._queue.get(timeout=min(remaining, 0.1))
             except Empty:
                 continue
-            self._events.append(event)
-            if isinstance(event, BackendReady):
-                self._backend_ready = True
-            elif isinstance(event, InstrumentationError):
-                if event.fatal:
-                    self._fail(event.phase, event.message)
-            elif isinstance(event, InstrumentationStatus) and event.status == "FAILED":
-                self._fail("instrumentation", event.reason or "agent reported FAILED")
+            self._record_event(event)
         return self._backend_ready
 
     def _wait_for_target(self, pid: int) -> tuple[int | None, int | None]:
         if hasattr(self.backend, "waitpid"):
             status = self.backend.waitpid(pid)
-        else:
-            _, status = os.waitpid(pid, 0)
+            return self._decode_wait_status(status)
+
+        _, status = os.waitpid(pid, 0)
+        return self._decode_wait_status(status)
+
+    def _decode_wait_status(self, status: int) -> tuple[int | None, int | None]:
         if os.WIFEXITED(status):
             return os.WEXITSTATUS(status), None
         if os.WIFSIGNALED(status):

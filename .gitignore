@@ -6,4 +6,7 @@ dist/
 *.egg-info/
 fixtures/c_dynamic/fixture
 fixtures/c_dynamic/fixture-late
+fixtures/c_embedded/fixture-sqlite-embedded
+fixtures/c_embedded/fixture-sqlite-embedded-stripped
+fixtures/node_binding/node_modules/
 core

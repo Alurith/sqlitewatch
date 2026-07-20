@@ -13,6 +13,8 @@ let readySent = false;
 let statusSent = false;
 let activeStatusSent = false;
 let observer;
+let unsupportedCandidates = 0;
+let unsupportedStatusSent = false;
 
 function event(type, fields) {
   const payload = Object.assign({ type: type, protocol_version: PROTOCOL_VERSION }, fields || {});
@@ -49,7 +51,12 @@ function moduleName(module) {
 
 function linkageFor(module) {
   const path = module.path || "";
-  return path.indexOf(".so") !== -1 ? "dynamic" : "embedded_or_unknown";
+  const basename = path.split("/").pop().toLowerCase();
+  if (/^libsqlite3\.so(?:\..*)?$/.test(basename) ||
+      basename === "libsqlite3.dylib" || basename === "sqlite3.dll") {
+    return "dynamic";
+  }
+  return "embedded_or_unknown";
 }
 
 function isSqliteCandidate(module) {
@@ -206,25 +213,26 @@ function inspectModule(module) {
   const address = findPrepare(module);
   if (address !== null) installHook(module, address);
   else if (isSqliteCandidate(module)) {
-    event("instrumentation_status", {
-      pid: Process.id,
-      status: "DETECTED_UNSUPPORTED",
-      hooks: hookCount,
-      reason: "sqlite3_prepare_v2 symbol not found"
-    });
-    statusSent = true;
+    unsupportedCandidates++;
+    // A candidate without the symbol is not sufficient to classify the whole
+    // process: another module may provide the same SQLite implementation.
+    // The final initial status is emitted only after every module was scanned.
   }
 }
 
 function sendInitialStatus() {
   if (statusSent) return;
+  const unsupported = hookCount === 0 && unsupportedCandidates > 0;
   event("instrumentation_status", {
     pid: Process.id,
-    status: hookCount > 0 ? "ACTIVE" : "NOT_DETECTED",
+    status: hookCount > 0 ? "ACTIVE" : (unsupported ? "DETECTED_UNSUPPORTED" : "NOT_DETECTED"),
     hooks: hookCount,
-    reason: hookCount > 0 ? null : "sqlite3_prepare_v2 not found in loaded modules"
+    reason: hookCount > 0 ? null : (unsupported
+      ? "sqlite3_prepare_v2 symbol not found"
+      : "sqlite3_prepare_v2 not found in loaded modules")
   });
   statusSent = true;
+  unsupportedStatusSent = unsupported;
   if (hookCount > 0) activeStatusSent = true;
 }
 
@@ -242,7 +250,18 @@ function start() {
   try {
     // Install the observer before the initial scan so a late dlopen cannot race it.
     observer = Process.attachModuleObserver({
-      onAdded: function (module) { inspectModule(module); },
+      onAdded: function (module) {
+        inspectModule(module);
+        if (statusSent && hookCount === 0 && unsupportedCandidates > 0 && !unsupportedStatusSent) {
+          event("instrumentation_status", {
+            pid: Process.id,
+            status: "DETECTED_UNSUPPORTED",
+            hooks: hookCount,
+            reason: "sqlite3_prepare_v2 symbol not found"
+          });
+          unsupportedStatusSent = true;
+        }
+      },
       onRemoved: function (module) {
         // Hooks remain valid for the lifetime of the native invocation; removed
         // modules are only omitted from future diagnostics.

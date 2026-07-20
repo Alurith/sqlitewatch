@@ -1,0 +1,12 @@
+{
+  "name": "sqlitewatch-node-binding-fixture",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Optional SQLiteWatch native binding validation fixture",
+  "engines": {
+    "node": ">=25 <26"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1"
+  }
+}
