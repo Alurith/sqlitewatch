@@ -4,8 +4,10 @@ import sys
 
 import pytest
 
+from sqlitewatch.analysis import analyze_run
 from sqlitewatch.events import StatementExecuted, StatementFinalized, StatementPrepared
 from sqlitewatch.process import ProcessController
+from sqlitewatch.reporting import render_json, render_terminal
 from tests.integration.matrix_support import build_matrix_record
 
 
@@ -76,6 +78,18 @@ def test_dynamic_fixture_is_instrumented(native_tools_available):
         for event in executions
     )
     assert any(isinstance(event, StatementFinalized) for event in result.events)
+
+    analysis = analyze_run(result)
+    scan_aggregate = next(aggregate for aggregate in analysis.aggregates if aggregate.normalized_sql == SCAN_SQL)
+    assert scan_aggregate.executions == 2
+    assert scan_aggregate.total_fullscan_steps == sum(event.fullscan_steps for event in scan_executions)
+    assert scan_aggregate.max_fullscan_steps == max(event.fullscan_steps for event in scan_executions)
+    sort_aggregate = next(aggregate for aggregate in analysis.aggregates if aggregate.normalized_sql == SORT_SQL)
+    autoindex_aggregate = next(aggregate for aggregate in analysis.aggregates if aggregate.normalized_sql == AUTOINDEX_SQL)
+    assert sort_aggregate.total_sorts > 0
+    assert autoindex_aggregate.total_autoindex > 0
+    assert SCAN_SQL in render_terminal(analysis)
+    assert SCAN_SQL in render_json(analysis)
 
     record = build_matrix_record(
         scenario="c-dynamic", command=command, result=result,

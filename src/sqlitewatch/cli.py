@@ -5,14 +5,10 @@ from __future__ import annotations
 import sys
 from typing import Sequence
 
-from .events import (
-    InstrumentationError,
-    SqliteDetected,
-    StatementExecuted,
-    StatementFinalized,
-    StatementPrepared,
-)
+from .analysis import analyze_run
+from .events import InstrumentationError
 from .process import ControllerConfig, ProcessController
+from .reporting import render_terminal
 
 _USAGE = "usage: sqlitewatch [--max-sql-length N] -- <command> [args...]"
 
@@ -67,29 +63,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"SQLiteWatch instrumentation failure: {exc}", file=sys.stderr)
         return 70
 
-    print("SQLiteWatch")
+    print(render_terminal(analyze_run(result)), end="")
     for event in result.events:
-        if isinstance(event, SqliteDetected):
-            print(f"[{result.instrumentation_status}] SQLite detected in {event.module}")
-        elif isinstance(event, StatementPrepared):
-            print(f"[statement_prepared] {event.sql}")
-        elif isinstance(event, StatementExecuted):
-            metrics = (
-                "metrics=unavailable" if event.fullscan_steps is None else
-                "fullscan_steps={0} vm_steps={1} sorts={2} autoindex={3}".format(
-                    event.fullscan_steps, event.vm_steps, event.sorts, event.autoindex
-                )
-            )
-            print(
-                f"[statement_executed] {event.statement} execution={event.execution_number} "
-                f"rc={event.sqlite_rc} boundary={event.boundary} {metrics}"
-            )
-        elif isinstance(event, StatementFinalized):
-            print(
-                f"[statement_finalized] {event.statement} executions={event.executions} "
-                f"rc={event.sqlite_rc}"
-            )
-        elif isinstance(event, InstrumentationError):
+        if isinstance(event, InstrumentationError):
             print(f"[instrumentation_error] {event.phase}: {event.message}", file=sys.stderr)
     if result.target_exit_code is not None:
         print(f"Target exited with code {result.target_exit_code}")
