@@ -7,6 +7,7 @@ from typing import Any, Literal, TypeAlias
 
 PROTOCOL_VERSION = 1
 InstrumentationState = str
+DoctorState = Literal["FAILED", "NOT_DETECTED", "DETECTED_UNSUPPORTED", "NO_ACTIVITY", "ACTIVE"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,8 @@ class LauncherReady:
 
 @dataclass(frozen=True, slots=True)
 class SqliteDetected:
+    """Legacy per-symbol detection event retained for the normal-run protocol."""
+
     pid: int
     module: str
     path: str
@@ -39,6 +42,33 @@ class SqliteDetected:
     linkage: str | None = None
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="sqlite_detected", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleCapability:
+    """Complete, same-module discovery record used by Doctor.
+
+    Tuples intentionally make the inventory stable and immutable at the domain
+    boundary.  A record is emitted after each inspected module and can be
+    replaced by a later record for the same module in the reducer.
+    """
+
+    pid: int
+    module: str
+    path: str
+    linkage: Literal["dynamic", "embedded_or_unknown"]
+    candidate: bool
+    scanned: bool
+    symbols_present: tuple[str, ...]
+    symbols_missing: tuple[str, ...]
+    metric_reader: bool
+    hooks_attempted: tuple[str, ...]
+    hooks_installed: tuple[str, ...]
+    hooks_failed: tuple[str, ...]
+    reasons: tuple[str, ...]
+    sqlite_version: str | None = None
+    protocol_version: int = PROTOCOL_VERSION
+    type: str = field(default="module_capability", init=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,15 +148,9 @@ class ProcessExited:
 
 
 Event: TypeAlias = (
-    BackendReady
-    | LauncherReady
-    | SqliteDetected
-    | InstrumentationStatus
-    | StatementPrepared
-    | StatementExecuted
-    | StatementFinalized
-    | InstrumentationError
-    | ProcessExited
+    BackendReady | LauncherReady | SqliteDetected | ModuleCapability |
+    InstrumentationStatus | StatementPrepared | StatementExecuted |
+    StatementFinalized | InstrumentationError | ProcessExited
 )
 
 
@@ -142,7 +166,6 @@ class RunResult:
 
     @property
     def exit_code(self) -> int:
-        """Return the CLI result while keeping target status separately available."""
         if self.instrumentation_failed:
             return 70
         if self.signal is not None:
@@ -151,7 +174,6 @@ class RunResult:
 
     @property
     def statements(self) -> tuple[StatementPrepared, ...]:
-        """Prepared statements, retained as the Phase 0–2 compatibility alias."""
         return tuple(event for event in self.events if isinstance(event, StatementPrepared))
 
     @property
@@ -164,7 +186,6 @@ class RunResult:
 
     def as_dict(self) -> dict[str, Any]:
         from .instrumentation.protocol import event_to_payload
-
         return {
             "pid": self.pid,
             "target_exit_code": self.target_exit_code,

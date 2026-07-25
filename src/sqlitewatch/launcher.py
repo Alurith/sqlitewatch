@@ -35,7 +35,7 @@ def _decode_status(pid: int, status: int) -> dict[str, int | None]:
     return {"pid": pid, "exit_code": 127, "signal": None}
 
 
-def _send_status(socket_path: str, record: dict[str, int | None]) -> None:
+def _send_status(socket_path: str, record: dict[str, int | str | None]) -> None:
     payload = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(5.0)
@@ -58,7 +58,7 @@ def run(argv: Sequence[str]) -> int:
     except OSError:
         # Preserve the conventional exec failure status through the same IPC
         # contract even though posix_spawn reports the failure in the parent.
-        _send_status(socket_path, {"pid": 0, "exit_code": 127, "signal": None})
+        _send_status(socket_path, {"kind": "launch_failure", "exit_code": 127})
         return 127
 
     forwarded_signal: int | None = None

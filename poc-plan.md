@@ -353,6 +353,12 @@ Hardening successivo:
 - recupero affidabile dell'exit code;
 - comportamento con processi figli.
 
+### Contratto Doctor implementato
+
+`sqlitewatch doctor [--format terminal|json] [--output FILE] -- <command>` ha un report e una policy distinti dal run normale. Gli stati sono `FAILED`, `NOT_DETECTED`, `DETECTED_UNSUPPORTED`, `NO_ACTIVITY` e `ACTIVE`. `ACTIVE` richiede che **un singolo modulo** abbia almeno un prepare, `step/reset/finalize`, un reader `sqlite3_stmt_status` invocabile e tutti gli hook lifecycle installati; inoltre il PID target deve emettere almeno un `statement_prepared`.
+
+Il JSON Doctor è un unico documento versionato su stdout. Con JSON su stdout, l'output del target passa a stderr; con `--output` gli stream del target restano invariati e il report è scritto atomicamente. La precedenza è output `74`, Doctor non `ACTIVE` `70`, segnale `128 + signal`, exit target non-zero, `0`. Il report dichiara il limite Linux x86_64 / parent-only: i figli sono rilasciati dal gate ma non instrumentati. SQL e lifecycle sono bounded e batchati; perdita/overflow del trasporto è fatale, mentre conflitti di concorrenza restano data-quality esplicita.
+
 ---
 
 ## Fuori scope del PoC

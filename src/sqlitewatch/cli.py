@@ -8,11 +8,17 @@ import sys
 from typing import Literal, Sequence
 
 from .analysis import RuleConfig, analyze_run, evaluate_rules
+from .doctor import reduce_events, resolve_doctor_outcome
 from .events import InstrumentationError
 from .outcome import resolve_outcome
 from .process import ControllerConfig, ProcessController
-from .reporting import ReportData, render_run_json, render_run_terminal
+from .reporting import (
+    ReportData, render_doctor_json, render_doctor_terminal, render_run_json,
+    render_run_terminal,
+)
 from .reporting.output import write_report
+
+_DOCTOR_USAGE = "usage: sqlitewatch doctor [--format terminal|json] [--output FILE] -- <command> [args...]"
 
 _USAGE = (
     "usage: sqlitewatch [--max-sql-length N] [--fail-fullscan-steps N] "
@@ -29,6 +35,13 @@ class CliError(ValueError):
 class CliConfig:
     controller: ControllerConfig
     rules: RuleConfig
+    format: Literal["terminal", "json"] = "terminal"
+    output: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorCliConfig:
+    controller: ControllerConfig
     format: Literal["terminal", "json"] = "terminal"
     output: Path | None = None
 
@@ -120,6 +133,45 @@ def _parse(argv: Sequence[str]) -> tuple[CliConfig, list[str]]:
     return CliConfig(controller, rules, report_format, output), target
 
 
+def _parse_doctor(argv: Sequence[str]) -> tuple[DoctorCliConfig, list[str]]:
+    args = list(argv)
+    try:
+        separator = args.index("--")
+    except ValueError as exc:
+        raise CliError("missing required delimiter '--'") from exc
+    options, target = args[:separator], args[separator + 1 :]
+    if not target:
+        raise CliError("missing target command after '--'")
+    report_format: Literal["terminal", "json"] = "terminal"
+    output: Path | None = None
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option.startswith("--format="):
+            value = option.partition("=")[2]
+            index += 1
+        elif option.startswith("--output="):
+            value = option.partition("=")[2]
+            option = "--output"
+            index += 1
+        elif option in {"--format", "--output"}:
+            if index + 1 >= len(options):
+                raise CliError(f"{option} requires a value")
+            value = options[index + 1]
+            index += 2
+        else:
+            raise CliError(f"Doctor does not support option: {option}")
+        if option.startswith("--format"):
+            if value not in {"terminal", "json"}:
+                raise CliError("--format must be 'terminal' or 'json'")
+            report_format = value  # type: ignore[assignment]
+        else:
+            if not value:
+                raise CliError("--output requires a non-empty path")
+            output = Path(value)
+    return DoctorCliConfig(ControllerConfig(doctor=True, target_stdout_to_stderr=report_format == "json" and output is None), report_format, output), target
+
+
 def _print_instrumentation_diagnostics(result: object) -> None:
     events = getattr(result, "events", ())
     for event in events:
@@ -132,20 +184,26 @@ def _print_instrumentation_diagnostics(result: object) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    doctor_mode = bool(args and args[0] == "doctor")
     try:
-        config, target = _parse(args)
+        config, target = _parse_doctor(args[1:]) if doctor_mode else _parse(args)
     except CliError as exc:
         print(f"sqlitewatch: {exc}", file=sys.stderr)
-        print(_USAGE, file=sys.stderr)
+        print(_DOCTOR_USAGE if doctor_mode else _USAGE, file=sys.stderr)
         return 2
 
     try:
         result = ProcessController().run(target, config.controller)
-        analysis = analyze_run(result)
-        rules = evaluate_rules(analysis, config.rules)
-        outcome = resolve_outcome(result, rules)
-        report = ReportData(analysis, rules, outcome)
-        content = render_run_json(report) if config.format == "json" else render_run_terminal(report)
+        if doctor_mode:
+            doctor_result = reduce_events(result)
+            outcome = resolve_doctor_outcome(doctor_result)
+            content = render_doctor_json(doctor_result, outcome) if config.format == "json" else render_doctor_terminal(doctor_result, outcome)
+        else:
+            analysis = analyze_run(result)
+            rules = evaluate_rules(analysis, config.rules)
+            outcome = resolve_outcome(result, rules)
+            report = ReportData(analysis, rules, outcome)
+            content = render_run_json(report) if config.format == "json" else render_run_terminal(report)
     except Exception as exc:
         print(f"SQLiteWatch instrumentation failure: {exc}", file=sys.stderr)
         return 70

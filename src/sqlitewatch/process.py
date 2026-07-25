@@ -13,6 +13,10 @@ from tempfile import TemporaryDirectory
 import time
 from typing import Any, Callable
 
+class _TargetLaunchFailure(RuntimeError):
+    """Expected launcher outcome for an unexecutable command."""
+
+
 from .events import (
     BackendReady,
     Event,
@@ -29,8 +33,12 @@ class ControllerConfig:
     max_sql_length: int = 65536
     backend_ready_timeout: float = 10.0
     launcher_ready_timeout: float = 10.0
-    completion_timeout: float = 30.0
+    # Completion is deliberately unbounded by default: this is target runtime,
+    # not a controller handshake.  Set an explicit value only for callers that
+    # want a runtime deadline.
+    completion_timeout: float | None = None
     target_stdout_to_stderr: bool = False
+    doctor: bool = False
 
 
 class ProcessController:
@@ -52,10 +60,12 @@ class ProcessController:
         config = config or ControllerConfig()
         if config.max_sql_length <= 0:
             raise ValueError("max_sql_length must be positive")
-        if not isinstance(config.target_stdout_to_stderr, bool):
-            raise ValueError("target_stdout_to_stderr must be a boolean")
-        if min(config.backend_ready_timeout, config.launcher_ready_timeout, config.completion_timeout) <= 0:
-            raise ValueError("controller timeouts must be positive")
+        if not isinstance(config.target_stdout_to_stderr, bool) or not isinstance(config.doctor, bool):
+            raise ValueError("controller boolean options must be booleans")
+        if min(config.backend_ready_timeout, config.launcher_ready_timeout) <= 0:
+            raise ValueError("controller handshake timeouts must be positive")
+        if config.completion_timeout is not None and config.completion_timeout <= 0:
+            raise ValueError("completion_timeout must be positive when configured")
 
         backend = self._backend()
         self._reset_state()
@@ -84,6 +94,10 @@ class ProcessController:
                     ]
                     launcher_pid = int(backend.spawn(launcher_argv))
                     backend.attach_launcher(launcher_pid)
+                    if hasattr(backend, "register_launcher_detached_handler"):
+                        backend.register_launcher_detached_handler(
+                            lambda reason: self._on_detached("launcher", reason)
+                        )
                     backend.enable_child_gating()
                     backend.register_child_handler(self._on_child_added)
                     backend.create_launcher_script(config)
@@ -99,10 +113,17 @@ class ProcessController:
                         raise RuntimeError(self._error_message or "launcher instrumentation failed")
 
                     backend.resume(launcher_pid)
-                    target_pid = self._wait_for_direct_child(launcher_pid, config.backend_ready_timeout)
+                    target_pid = self._wait_for_direct_child(launcher_pid, config.backend_ready_timeout, listener)
                     if target_pid is None:
+                        if self._launch_failed:
+                            target_exit, target_signal = 127, None
+                            raise _TargetLaunchFailure("target launch failed")
                         raise RuntimeError(self._error_message or "expected launcher child was not gated")
                     backend.attach_target(target_pid)
+                    if hasattr(backend, "register_target_detached_handler"):
+                        backend.register_target_detached_handler(
+                            lambda reason: self._on_detached("target", reason)
+                        )
                     backend.create_target_script(config)
                     backend.register_target_message_handler(self._on_event)
                     backend.load_target()
@@ -115,11 +136,19 @@ class ProcessController:
                     if self._instrumentation_failed:
                         raise RuntimeError(self._error_message or "target instrumentation failed")
 
+                    # The launcher gate is released after target attach/ready.  The
+                    # target itself remains suspended until the following resume.
+                    if hasattr(backend, "disable_child_gating"):
+                        backend.disable_child_gating()
                     backend.resume(target_pid)
                     target_exit, target_signal = self._receive_completion(
                         listener, target_pid, config.completion_timeout
                     )
                     self._drain_queue_until_quiet()
+                except _TargetLaunchFailure:
+                    # posix_spawnp could not execute the command.  This is the
+                    # target's conventional 127 outcome, not instrumentation.
+                    pass
                 except KeyboardInterrupt:
                     # Ctrl-C is a normal target interruption, not an excuse to
                     # detach and orphan the launcher-owned Django process.
@@ -128,7 +157,7 @@ class ProcessController:
                     if target_pid is not None:
                         try:
                             target_exit, target_signal = self._receive_completion(
-                                listener, target_pid, min(config.completion_timeout, 5.0)
+                                listener, target_pid, 5.0 if config.completion_timeout is None else min(config.completion_timeout, 5.0)
                             )
                         except Exception as exc:
                             self._fail("interrupt_cleanup", str(exc))
@@ -146,6 +175,7 @@ class ProcessController:
                             ProcessExited(pid=target_pid, exit_code=target_exit, signal=target_signal)
                         )
                     try:
+                        self._detaching = True
                         if hasattr(backend, "detach"):
                             backend.detach()
                         elif hasattr(backend, "close"):
@@ -179,6 +209,8 @@ class ProcessController:
         self._backend_ready = False
         self._instrumentation_failed = False
         self._error_message = None
+        self._launch_failed = False
+        self._detaching = False
 
     def _on_event(self, event: Event) -> None:
         self._queue.put(event)
@@ -229,7 +261,7 @@ class ProcessController:
                 return True
         return False
 
-    def _wait_for_direct_child(self, launcher_pid: int, timeout: float) -> int | None:
+    def _wait_for_direct_child(self, launcher_pid: int, timeout: float, listener: socket.socket | None = None) -> int | None:
         deadline = time.monotonic() + timeout
         while not self._instrumentation_failed:
             remaining = deadline - time.monotonic()
@@ -240,6 +272,8 @@ class ProcessController:
                 child = self._children.get(timeout=min(remaining, 0.1))
             except Empty:
                 self._drain_queue()
+                if listener is not None and self._try_launch_failure(listener):
+                    return None
                 continue
             pid = int(getattr(child, "pid", child))
             parent_pid = getattr(child, "parent_pid", launcher_pid)
@@ -256,16 +290,16 @@ class ProcessController:
         return None
 
     def _receive_completion(
-        self, listener: socket.socket, expected_pid: int, timeout: float
+        self, listener: socket.socket, expected_pid: int, timeout: float | None
     ) -> tuple[int | None, int | None]:
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         connection: socket.socket | None = None
         try:
             while connection is None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
                     raise RuntimeError("launcher completion socket timed out")
-                listener.settimeout(min(remaining, 0.1))
+                listener.settimeout(0.1 if remaining is None else min(remaining, 0.1))
                 try:
                     connection, _ = listener.accept()
                 except TimeoutError:
@@ -274,10 +308,10 @@ class ProcessController:
                         raise RuntimeError(self._error_message or "instrumentation failed")
             data = bytearray()
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
                     raise RuntimeError("launcher completion socket closed or timed out")
-                connection.settimeout(min(remaining, 0.1))
+                connection.settimeout(0.1 if remaining is None else min(remaining, 0.1))
                 try:
                     chunk = connection.recv(4096)
                 except TimeoutError:
@@ -292,6 +326,33 @@ class ProcessController:
         finally:
             if connection is not None:
                 connection.close()
+
+    def _try_launch_failure(self, listener: socket.socket) -> bool:
+        """Recognize a launcher-side exec failure while no gated child exists."""
+        try:
+            listener.setblocking(False)
+            connection, _ = listener.accept()
+        except (BlockingIOError, TimeoutError):
+            return False
+        finally:
+            listener.setblocking(True)
+        try:
+            data = bytearray()
+            connection.settimeout(0.1)
+            while chunk := connection.recv(4096):
+                data.extend(chunk)
+                if len(data) > 8192:
+                    raise RuntimeError("launcher completion record is too large")
+            try:
+                record = json.loads(bytes(data).decode("utf-8").rstrip("\n"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("launcher launch-failure record is invalid") from exc
+            if record == {"kind": "launch_failure", "exit_code": 127}:
+                self._launch_failed = True
+                return True
+            raise RuntimeError("unexpected completion before target child")
+        finally:
+            connection.close()
 
     @staticmethod
     def _validate_completion(data: bytes, expected_pid: int) -> tuple[int | None, int | None]:
@@ -323,6 +384,12 @@ class ProcessController:
         except Exception:
             # Cleanup must not mask the original protocol or instrumentation error.
             pass
+
+    def _on_detached(self, session: str, reason: str) -> None:
+        # A target naturally detaches when it terminates; anything else before
+        # controller cleanup means the event stream can no longer be trusted.
+        if not self._detaching and reason not in {"process-terminated", "application-requested"}:
+            self._fail("detach", f"{session} session detached: {reason}")
 
     def _fail(self, phase: str, message: str) -> None:
         self._instrumentation_failed = True

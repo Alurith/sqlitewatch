@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 
-from .protocol import ProtocolError, frida_message_to_event
+from .protocol import ProtocolError, frida_message_to_events
 from ..events import Event, InstrumentationError
 
 
@@ -36,6 +36,7 @@ class FridaBackend:
         self._target_callback: Callable[[Event], None] | None = None
         self._child_callback: Callable[[Any], None] | None = None
         self._lock = Lock()
+        self._next_lifecycle_sequence = 1
         self.agent_path = agent_path or self._find_agent()
         self.bootstrap_path = bootstrap_path or self._find_bootstrap()
 
@@ -73,6 +74,12 @@ class FridaBackend:
             raise RuntimeError("attach_launcher must happen before child gating")
         self.launcher_session.enable_child_gating()
 
+    def disable_child_gating(self) -> None:
+        """Release later launcher children before resuming the instrumented target."""
+        if self.launcher_session is None:
+            raise RuntimeError("attach_launcher must happen before child-gate release")
+        self.launcher_session.disable_child_gating()
+
     def register_child_handler(self, callback: Callable[[Any], None]) -> None:
         if self.device is None:
             raise RuntimeError("device is not initialized")
@@ -101,7 +108,8 @@ class FridaBackend:
     def _register_detached(session: Any, callback: Callable[[str], None]) -> None:
         if session is None:
             raise RuntimeError("attach must happen before registering detached handler")
-        session.on("detached", callback)
+        # Frida versions may include a second crash argument.
+        session.on("detached", lambda reason, *_details: callback(str(reason)))
 
     def create_launcher_script(self, _config: Any = None) -> Any:
         if self.launcher_session is None:
@@ -117,7 +125,8 @@ class FridaBackend:
         max_sql_length = int(getattr(config, "max_sql_length", 65536))
         if max_sql_length <= 0:
             raise ValueError("max_sql_length must be positive")
-        prefix = f"var SQLITEWATCH_CONFIG = {{ max_sql_length: {max_sql_length} }};\n"
+        doctor = bool(getattr(config, "doctor", False))
+        prefix = f"var SQLITEWATCH_CONFIG = {{ max_sql_length: {max_sql_length}, doctor: {str(doctor).lower()} }};\n"
         self.target_script = self.target_session.create_script(
             prefix + self.agent_path.read_text(encoding="utf-8"), name="sqlitewatch_agent.js"
         )
@@ -135,13 +144,21 @@ class FridaBackend:
             raise RuntimeError("create_target_script must happen before registering a callback")
         self.target_script.on("message", lambda message, data: self._on_message(message, data, callback))
 
-    @staticmethod
-    def _on_message(message: dict[str, Any], _data: Any, callback: Callable[[Event], None]) -> None:
+    def _on_message(self, message: dict[str, Any], _data: Any, callback: Callable[[Event], None]) -> None:
         try:
-            event = frida_message_to_event(message)
+            payload = message.get("payload") if message.get("type") == "send" else None
+            if isinstance(payload, dict) and payload.get("type") == "lifecycle_batch":
+                sequence = payload.get("sequence")
+                if sequence != self._next_lifecycle_sequence:
+                    raise ProtocolError(f"invalid lifecycle batch sequence: expected {self._next_lifecycle_sequence}")
+                events = frida_message_to_events(message)
+                self._next_lifecycle_sequence += 1
+            else:
+                events = frida_message_to_events(message)
         except ProtocolError as exc:
-            event = InstrumentationError(phase="protocol", message=str(exc), fatal=True)
-        callback(event)
+            events = (InstrumentationError(phase="protocol", message=str(exc), fatal=True),)
+        for event in events:
+            callback(event)
 
     def load_launcher(self) -> None:
         if self.launcher_script is None:

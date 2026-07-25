@@ -706,6 +706,14 @@ Le soglie fullscan e VM confrontano soltanto il massimo per singola esecuzione c
 
 Quando almeno una regola è configurata, `NOT_DETECTED` e `DETECTED_UNSUPPORTED`, come `FAILED`, sono instrumentation failure e restituiscono `70`. In `--format json` senza `--output`, stdout del target viene consegnato a stderr così stdout rimane un singolo JSON parseabile. Con `--output FILE`, il report viene scritto atomicamente in UTF-8 nella directory già esistente; stdout del target non viene rediretto.
 
+### 20.2 Doctor e hardening implementati
+
+La sintassi Doctor è `sqlitewatch doctor [--format terminal|json] [--output FILE] -- <command>`. Il JSON è un documento Doctor distinto (`schema_version: 1`, `report_type: sqlitewatch_doctor`) e include target, inventario dei moduli, linkage, simboli, reader metriche, hook, activity, ragioni, limiti e outcome. Gli stati validi sono `FAILED`, `NOT_DETECTED`, `DETECTED_UNSUPPORTED`, `NO_ACTIVITY` e `ACTIVE`. `NO_ACTIVITY` e ogni stato non-`ACTIVE` sono failure diagnostiche (`70`); dopo `ACTIVE` valgono segnale e codice target. Un errore di writer/stdout prevale sempre con `74`.
+
+In JSON stdout l'output target viene rediretto a stderr; con `--output` il target conserva i propri stream e il writer atomico scrive il report. L'instrumentation richiede Linux x86_64 e solo il processo parent: il child-gating viene rilasciato prima della resume del target, quindi i figli proseguono senza essere instrumentati. La discovery non applica scansioni aggressive a moduli tardivi non candidati e dichiara il fingerprinting stripped fuori scope.
+
+Le letture SQL sono bounded e non fanno affidamento su input parziale non validato. I lifecycle event sono batchati nell'ordine originale; overflow o perdita di trasporto è failure fatale. Conflitti di ownership/reentrancy degli statement producono data quality esplicita, senza combinare metriche. Il timeout predefinito vale solo per handshake: la durata del target non ha un limite artificiale; un command ineseguibile è un exit target convenzionale `127`.
+
 # 21. Baseline
 
 La baseline è una funzionalità altamente desiderabile per l'MVP, ma può essere considerata opzionale nella prima iterazione.

@@ -1477,6 +1477,16 @@ These features should be implemented on top of the event and analysis architectu
 
 # 37. Core Architectural Principle
 
+### 35.1 Doctor and hardened lifecycle contract
+
+`sqlitewatch doctor [--format terminal|json] [--output FILE] -- command` is a diagnostic flow, not an analysis report. Its reducer receives immutable per-module inventories and only marks a module supported when all usable capabilities belong to that same module: one prepare entry point, step/reset/finalize hooks and an invocable `sqlite3_stmt_status` reader. It reports `FAILED`, `NOT_DETECTED`, `DETECTED_UNSUPPORTED`, `NO_ACTIVITY`, or `ACTIVE`; a Frida/protocol/transport failure always takes precedence over absence or inactivity.
+
+Lifecycle payloads are bounded ordered batches expanded and validated before entering the controller queue. Overflow, a failed flush, malformed members, or an invalid batch sequence are fatal. SQL reads are bounded and treat invalid pointers as uncapturable input. Statement contexts record owner TID and active depth so conflicting reuse is reported as data quality rather than merging counters.
+
+The launcher releases child gating after the first target is ready and before its resume. This prevents later children being left stopped; they are deliberately neither attached nor aggregated. Target completion has no default runtime deadline, while launcher/backend handshakes retain finite timeouts. An unexecutable command is a normal target exit `127`, not a malformed PID record.
+
+# 37. Core Architectural Principle
+
 SQLiteWatch should maintain a strict separation between:
 
 ```text
