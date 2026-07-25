@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 
 import pytest
@@ -11,7 +12,16 @@ from sqlitewatch.events import (
     StatementFinalized,
     StatementPrepared,
 )
-from sqlitewatch.process import ControllerConfig, ProcessController
+from sqlitewatch.process import ControllerConfig, ProcessController as RealProcessController
+
+
+class ProcessController(RealProcessController):
+    @staticmethod
+    def _peer_credentials(connection):
+        return 1234, os.geteuid(), os.getegid()
+
+    def _same_process_alive(self, pid):
+        return pid in getattr(self.backend, "alive", set())
 
 
 class Child:
@@ -22,6 +32,7 @@ class Child:
 class FakeBackend:
     def __init__(self, *, completion=None, child=Child(), fail_load=False, emit_child=True, interrupt_target=False):
         self.calls = []
+        self.alive = {1234}
         self.launcher_callback = None
         self.target_callback = None
         self.child_callback = None
@@ -66,6 +77,7 @@ class FakeBackend:
         self.calls.append(("resume", pid))
         if pid == 1234:
             if self.emit_child:
+                self.alive.add(5678)
                 self.child_callback(self.child)
         else:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -76,8 +88,13 @@ class FakeBackend:
                     client.sendall((json.dumps(self.completion) + "\n").encode())
             if self.interrupt_target:
                 raise KeyboardInterrupt
+            self.alive.discard(5678)
+            self.alive.discard(1234)
 
-    def terminate_launcher(self, pid, signum=None): self.calls.append(("terminate_launcher", pid, signum))
+    def terminate_launcher(self, pid, signum=None):
+        self.calls.append(("terminate_launcher", pid, signum))
+        self.alive.discard(pid)
+        self.alive.discard(5678)
     def detach(self): self.calls.append("detach")
 
 
@@ -129,7 +146,7 @@ def test_invalid_socket_completion_fails_instrumentation(completion):
     result = ProcessController(backend).run(["target"], ControllerConfig(backend_ready_timeout=0.1, launcher_ready_timeout=0.1))
     assert result.instrumentation_failed
     assert result.instrumentation_status == "FAILED"
-    assert any(call[:2] == ("terminate_launcher", 1234) for call in backend.calls)
+    assert not backend.alive
 
 
 def test_unexpected_child_fails_instrumentation():
@@ -155,6 +172,51 @@ def test_child_gating_timeout_fails_instrumentation():
     )
     assert result.instrumentation_failed
     assert "child_gating" in (result.instrumentation_error or "")
+
+
+def test_materialized_retention_limit_fails_clearly_but_streaming_drops_lifecycle():
+    limited = ProcessController(FakeBackend()).run(
+        ["target"],
+        ControllerConfig(
+            backend_ready_timeout=0.1,
+            launcher_ready_timeout=0.1,
+            max_retained_events=4,
+        ),
+    )
+    assert limited.instrumentation_failed
+    assert "event retention limit exceeded" in (limited.instrumentation_error or "")
+
+    consumed = []
+    streamed = ProcessController(FakeBackend()).run(
+        ["target"],
+        ControllerConfig(
+            backend_ready_timeout=0.1,
+            launcher_ready_timeout=0.1,
+            max_retained_events=4,
+        ),
+        event_consumer=consumed.append,
+        retain_events=False,
+    )
+    assert not streamed.instrumentation_failed
+    assert any(isinstance(event, StatementExecuted) for event in consumed)
+    assert not any(
+        isinstance(event, (StatementPrepared, StatementExecuted, StatementFinalized))
+        for event in streamed.events
+    )
+
+
+def test_completion_peer_must_be_launcher_and_same_uid(monkeypatch):
+    controller = RealProcessController()
+    monkeypatch.setattr(
+        controller, "_peer_credentials", lambda connection: (999, os.geteuid(), os.getegid())
+    )
+    with pytest.raises(RuntimeError, match="not launcher"):
+        controller._authenticate_peer(object(), 1234)
+    monkeypatch.setattr(
+        controller, "_peer_credentials", lambda connection: (1234, os.geteuid() + 1, os.getegid())
+    )
+    with pytest.raises(RuntimeError, match="does not match"):
+        controller._authenticate_peer(object(), 1234)
 
 
 def test_load_failure_is_instrumentation_failure_and_cleanup_runs():

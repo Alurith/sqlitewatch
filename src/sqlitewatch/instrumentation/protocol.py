@@ -15,6 +15,7 @@ from ..events import (
     PROTOCOL_VERSION, BackendReady, Event, InstrumentationError,
     InstrumentationStatus, LauncherReady, ModuleCapability, ProcessExited,
     SqliteDetected, StatementExecuted, StatementFinalized, StatementPrepared,
+    StatementStarted,
 )
 
 _POINTER = re.compile(r"^0x[0-9a-f]+$")
@@ -24,23 +25,24 @@ _SYMBOLS = {
 }
 _TYPES = {
     "backend_ready", "launcher_ready", "sqlite_detected", "module_capability",
-    "instrumentation_status", "statement_prepared", "statement_executed",
+    "instrumentation_status", "statement_prepared", "statement_started", "statement_executed",
     "statement_finalized", "instrumentation_error", "process_exited", "lifecycle_batch",
 }
 _ALLOWED_FIELDS = {
     "backend_ready": {"type", "protocol_version", "pid", "arch", "platform"},
     "launcher_ready": {"type", "protocol_version", "pid", "arch", "platform"},
-    "sqlite_detected": {"type", "protocol_version", "pid", "module", "path", "symbol", "address", "linkage"},
-    "module_capability": {"type", "protocol_version", "pid", "module", "path", "linkage", "candidate", "scanned", "symbols_present", "symbols_missing", "metric_reader", "hooks_attempted", "hooks_installed", "hooks_failed", "reasons", "sqlite_version"},
-    "instrumentation_status": {"type", "protocol_version", "status", "pid", "hooks", "reason"},
-    "statement_prepared": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "sql", "sqlite_rc", "sql_truncated", "captured_bytes"},
-    "statement_executed": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "execution_number", "sqlite_rc", "boundary", "fullscan_steps", "vm_steps", "sorts", "autoindex"},
-    "statement_finalized": {"type", "protocol_version", "pid", "tid", "module", "statement", "database", "executions", "sqlite_rc"},
-    "instrumentation_error": {"type", "protocol_version", "phase", "message", "pid", "fatal", "sqlite_rc"},
+    "sqlite_detected": {"type", "protocol_version", "pid", "module", "path", "base", "symbol", "address", "linkage"},
+    "module_capability": {"type", "protocol_version", "pid", "module", "path", "base", "linkage", "candidate", "scanned", "symbols_present", "symbols_missing", "metric_reader", "hooks_attempted", "hooks_installed", "hooks_failed", "reasons", "sqlite_version"},
+    "instrumentation_status": {"type", "protocol_version", "status", "pid", "hooks", "reason", "sql_capture_limit"},
+    "statement_prepared": {"type", "protocol_version", "pid", "tid", "module", "module_path", "module_base", "statement", "database", "sql", "sqlite_rc", "sql_truncated", "captured_bytes", "sql_capture_failed"},
+    "statement_started": {"type", "protocol_version", "pid", "tid", "module", "module_path", "module_base", "statement", "database", "execution_number"},
+    "statement_executed": {"type", "protocol_version", "pid", "tid", "module", "module_path", "module_base", "statement", "database", "execution_number", "sqlite_rc", "boundary", "fullscan_steps", "vm_steps", "sorts", "autoindex"},
+    "statement_finalized": {"type", "protocol_version", "pid", "tid", "module", "module_path", "module_base", "statement", "database", "executions", "sqlite_rc"},
+    "instrumentation_error": {"type", "protocol_version", "phase", "message", "pid", "fatal", "sqlite_rc", "data_loss"},
     "process_exited": {"type", "protocol_version", "pid", "exit_code", "signal"},
-    "lifecycle_batch": {"type", "protocol_version", "sequence", "events"},
+    "lifecycle_batch": {"type", "protocol_version", "sequence", "ack_required", "events"},
 }
-_LIFECYCLE_TYPES = {"statement_prepared", "statement_executed", "statement_finalized"}
+_LIFECYCLE_TYPES = {"statement_prepared", "statement_started", "statement_executed", "statement_finalized"}
 
 
 class ProtocolError(ValueError):
@@ -95,6 +97,10 @@ def _pointer(value: Any, name: str) -> str:
 def _string(value: Any, name: str) -> str:
     if not isinstance(value, str):
         raise ProtocolError(f"{name} must be a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProtocolError(f"{name} must be valid UTF-8 text") from exc
     return value
 
 
@@ -138,49 +144,117 @@ def payload_to_event(payload: Any) -> Event:
         _required(data, "pid")
         return LauncherReady(_positive_int(data["pid"], "pid"), arch=_string(data.get("arch", "x64"), "arch"), platform=_string(data.get("platform", "linux"), "platform"))
     if event_type == "sqlite_detected":
-        _required(data, "pid", "module", "path", "symbol", "address")
-        return SqliteDetected(_positive_int(data["pid"], "pid"), _string(data["module"], "module"), _string(data["path"], "path"), _string(data["symbol"], "symbol"), _pointer(data["address"], "address"), _optional_string(data.get("linkage"), "linkage"))
+        _required(data, "pid", "module", "path", "base", "symbol", "address")
+        return SqliteDetected(
+            _positive_int(data["pid"], "pid"), _string(data["module"], "module"),
+            _string(data["path"], "path"), _string(data["symbol"], "symbol"),
+            _pointer(data["address"], "address"), _optional_string(data.get("linkage"), "linkage"),
+            _pointer(data["base"], "base"),
+        )
     if event_type == "module_capability":
-        _required(data, "pid", "module", "path", "linkage", "candidate", "scanned", "symbols_present", "symbols_missing", "metric_reader", "hooks_attempted", "hooks_installed", "hooks_failed", "reasons")
+        _required(data, "pid", "module", "path", "base", "linkage", "candidate", "scanned", "symbols_present", "symbols_missing", "metric_reader", "hooks_attempted", "hooks_installed", "hooks_failed", "reasons")
         linkage = _string(data["linkage"], "linkage")
         if linkage not in {"dynamic", "embedded_or_unknown"}:
             raise ProtocolError("invalid linkage")
         reasons = data["reasons"]
         if not isinstance(reasons, list) or any(not isinstance(reason, str) or not reason for reason in reasons) or reasons != sorted(set(reasons)):
             raise ProtocolError("reasons must be unique, non-empty, and sorted")
+        validated_reasons = tuple(
+            _string(reason, "reasons item") for reason in reasons
+        )
         return ModuleCapability(
             _positive_int(data["pid"], "pid"), _string(data["module"], "module"), _string(data["path"], "path"), linkage,  # type: ignore[arg-type]
             _bool(data["candidate"], "candidate"), _bool(data["scanned"], "scanned"),
             _symbols(data["symbols_present"], "symbols_present"), _symbols(data["symbols_missing"], "symbols_missing"),
             _bool(data["metric_reader"], "metric_reader"), _symbols(data["hooks_attempted"], "hooks_attempted"),
             _symbols(data["hooks_installed"], "hooks_installed"), _symbols(data["hooks_failed"], "hooks_failed"),
-            tuple(reasons), _optional_string(data.get("sqlite_version"), "sqlite_version"),
+            validated_reasons, _optional_string(data.get("sqlite_version"), "sqlite_version"),
+            _pointer(data["base"], "base"),
         )
     if event_type == "instrumentation_status":
         _required(data, "pid", "status")
         status = _string(data["status"], "status")
-        if status not in {"ACTIVE", "DETECTED_UNSUPPORTED", "FAILED", "NOT_DETECTED"}:
+        if status not in {"ACTIVE", "PARTIAL", "DETECTED_UNSUPPORTED", "FAILED", "NOT_DETECTED"}:
             raise ProtocolError(f"unknown instrumentation status: {status!r}")
-        return InstrumentationStatus(status, _positive_int(data["pid"], "pid"), _nonnegative_int(data.get("hooks", 0), "hooks"), _optional_string(data.get("reason"), "reason"))
+        capture_limit = data.get("sql_capture_limit")
+        return InstrumentationStatus(
+            status, _positive_int(data["pid"], "pid"),
+            _nonnegative_int(data.get("hooks", 0), "hooks"),
+            _optional_string(data.get("reason"), "reason"),
+            None if capture_limit is None else _positive_int(capture_limit, "sql_capture_limit"),
+        )
     if event_type == "statement_prepared":
-        _required(data, "pid", "tid", "module", "statement", "database", "sql")
-        captured = data.get("captured_bytes")
-        return StatementPrepared(_positive_int(data["pid"], "pid"), _positive_int(data["tid"], "tid"), _string(data["module"], "module"), _pointer(data["statement"], "statement"), _pointer(data["database"], "database"), _string(data["sql"], "sql"), _integer(data.get("sqlite_rc", 0), "sqlite_rc"), _bool(data.get("sql_truncated", False), "sql_truncated"), None if captured is None else _nonnegative_int(captured, "captured_bytes"))
+        _required(
+            data, "pid", "tid", "module", "module_path", "module_base", "statement",
+            "database", "sql", "sql_truncated", "captured_bytes", "sql_capture_failed",
+        )
+        sql = _string(data["sql"], "sql")
+        truncated = _bool(data["sql_truncated"], "sql_truncated")
+        captured = _nonnegative_int(data["captured_bytes"], "captured_bytes")
+        capture_failed = _bool(data["sql_capture_failed"], "sql_capture_failed")
+        if captured != len(sql.encode("utf-8")):
+            raise ProtocolError("captured_bytes must equal the UTF-8 byte length of sql", payload=payload)
+        if capture_failed and (sql or truncated or captured):
+            raise ProtocolError("failed SQL capture must have empty, non-truncated SQL", payload=payload)
+        return StatementPrepared(
+            _positive_int(data["pid"], "pid"), _positive_int(data["tid"], "tid"),
+            _string(data["module"], "module"), _pointer(data["statement"], "statement"),
+            _pointer(data["database"], "database"), sql,
+            _integer(data.get("sqlite_rc", 0), "sqlite_rc"), truncated, captured,
+            capture_failed, _string(data["module_path"], "module_path"),
+            _pointer(data["module_base"], "module_base"),
+        )
+    if event_type == "statement_started":
+        _required(
+            data, "pid", "tid", "module", "module_path", "module_base",
+            "statement", "database", "execution_number",
+        )
+        return StatementStarted(
+            _positive_int(data["pid"], "pid"), _positive_int(data["tid"], "tid"),
+            _string(data["module"], "module"), _pointer(data["statement"], "statement"),
+            _pointer(data["database"], "database"),
+            _positive_int(data["execution_number"], "execution_number"),
+            _string(data["module_path"], "module_path"),
+            _pointer(data["module_base"], "module_base"),
+        )
     if event_type == "statement_executed":
         _required(data, "pid", "tid", "module", "statement", "database", "execution_number", "sqlite_rc", "boundary")
         boundary = _string(data["boundary"], "boundary")
         if boundary not in {"done", "error", "reset", "finalize"}:
             raise ProtocolError(f"unknown execution boundary: {boundary!r}")
+        _required(data, "module_path", "module_base")
         metrics = _execution_metrics(data)
-        return StatementExecuted(_positive_int(data["pid"], "pid"), _positive_int(data["tid"], "tid"), _string(data["module"], "module"), _pointer(data["statement"], "statement"), _pointer(data["database"], "database"), _positive_int(data["execution_number"], "execution_number"), _integer(data["sqlite_rc"], "sqlite_rc"), boundary, *metrics)  # type: ignore[arg-type]
+        return StatementExecuted(
+            _positive_int(data["pid"], "pid"), _positive_int(data["tid"], "tid"),
+            _string(data["module"], "module"), _pointer(data["statement"], "statement"),
+            _pointer(data["database"], "database"),
+            _positive_int(data["execution_number"], "execution_number"),
+            _integer(data["sqlite_rc"], "sqlite_rc"), boundary, *metrics,
+            _string(data["module_path"], "module_path"),
+            _pointer(data["module_base"], "module_base"),
+        )  # type: ignore[arg-type]
     if event_type == "statement_finalized":
-        _required(data, "pid", "tid", "module", "statement", "database", "executions", "sqlite_rc")
-        return StatementFinalized(_positive_int(data["pid"], "pid"), _positive_int(data["tid"], "tid"), _string(data["module"], "module"), _pointer(data["statement"], "statement"), _pointer(data["database"], "database"), _nonnegative_int(data["executions"], "executions"), _integer(data["sqlite_rc"], "sqlite_rc"))
+        _required(data, "pid", "tid", "module", "module_path", "module_base", "statement", "database", "executions", "sqlite_rc")
+        return StatementFinalized(
+            _positive_int(data["pid"], "pid"), _positive_int(data["tid"], "tid"),
+            _string(data["module"], "module"), _pointer(data["statement"], "statement"),
+            _pointer(data["database"], "database"),
+            _nonnegative_int(data["executions"], "executions"),
+            _integer(data["sqlite_rc"], "sqlite_rc"),
+            _string(data["module_path"], "module_path"),
+            _pointer(data["module_base"], "module_base"),
+        )
     if event_type == "instrumentation_error":
         _required(data, "phase", "message")
         pid = data.get("pid")
         sqlite_rc = data.get("sqlite_rc")
-        return InstrumentationError(_string(data["phase"], "phase"), _string(data["message"], "message"), None if pid is None else _positive_int(pid, "pid"), _bool(data.get("fatal", True), "fatal"), None if sqlite_rc is None else _integer(sqlite_rc, "sqlite_rc"))
+        return InstrumentationError(
+            _string(data["phase"], "phase"), _string(data["message"], "message"),
+            None if pid is None else _positive_int(pid, "pid"),
+            _bool(data.get("fatal", True), "fatal"),
+            None if sqlite_rc is None else _integer(sqlite_rc, "sqlite_rc"),
+            _bool(data.get("data_loss", False), "data_loss"),
+        )
     _required(data, "pid")
     exit_code, signal = data.get("exit_code"), data.get("signal")
     exit_code = None if exit_code is None else _nonnegative_int(exit_code, "exit_code")
@@ -207,8 +281,9 @@ def payload_to_events(payload: Any) -> tuple[Event, ...]:
         return (payload_to_event(data),)
     _common(data, "lifecycle_batch")
     _known_fields(data, "lifecycle_batch")
-    _required(data, "sequence", "events")
+    _required(data, "sequence", "ack_required", "events")
     _positive_int(data["sequence"], "sequence")
+    _bool(data["ack_required"], "ack_required")
     members = data["events"]
     if not isinstance(members, list) or not members:
         raise ProtocolError("lifecycle_batch events must be a non-empty list", payload=payload)

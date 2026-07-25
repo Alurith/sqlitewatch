@@ -36,12 +36,18 @@ def test_late_loaded_sqlite_is_observed(native_tools_available):
     )
     assert result.target_exit_code == 0
     assert any(event.sql == SQL for event in result.statements)
+    assert any(event.sql == "SELECT 2" for event in result.statements)
     assert len(result.statements) == len({(event.statement, event.sql) for event in result.statements})
     executions = [event for event in result.events if isinstance(event, StatementExecuted)]
     assert executions
     assert all(event.fullscan_steps is not None and event.vm_steps is not None for event in executions)
     assert any(isinstance(event, StatementFinalized) for event in result.events)
+    assert normal.stdout == "name=Ada\nreload=2\n"
     assert normal.stdout in instrumented.stdout
+    assert not any(
+        "hook deduplicated" in getattr(event, "message", "")
+        for event in result.events
+    )
 
     record = build_matrix_record(
         scenario="c-dynamic-dlopen",

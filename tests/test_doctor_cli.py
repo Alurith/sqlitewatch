@@ -18,7 +18,13 @@ def test_doctor_parser_is_separate_and_json_stdout_is_clean(monkeypatch, capsys)
         def run(self, target, config):
             assert target == ["target"]
             assert config.doctor and config.target_stdout_to_stderr
-            return RunResult(1, 0, None, (MODULE, StatementPrepared(1, 1, "sqlite", "0x1", "0x2", "SELECT 1")), "ACTIVE")
+            return RunResult(1, 0, None, (
+                MODULE,
+                StatementPrepared(
+                    1, 1, "libsqlite3.so", "0x1", "0x2", "SELECT 1",
+                    module_path="/usr/lib/libsqlite3.so", module_base="0x0",
+                ),
+            ), "ACTIVE")
     monkeypatch.setattr(cli, "ProcessController", lambda: Controller())
     assert cli.main(["doctor", "--format", "json", "--", "target"]) == 0
     payload = json.loads(capsys.readouterr().out)

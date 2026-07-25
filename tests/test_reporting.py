@@ -23,7 +23,9 @@ def _analysis(*, null=False):
         StatementExecuted(7, 1, "sqlite", "0x1", "0x2", 1, 101, "done", **metrics),
         StatementFinalized(7, 1, "sqlite", "0x1", "0x2", 1, 0),
     )
-    return analyze_run(RunResult(7, 0, None, events, "ACTIVE"))
+    return analyze_run(
+        RunResult(7, 0, None, events, "ACTIVE", sql_capture_limit=4096)
+    )
 
 
 def test_terminal_report_contains_summary_scope_metrics_and_signals():
@@ -52,14 +54,16 @@ def _report(*, config=RuleConfig(), target_exit=0, status="ACTIVE", instrumentat
 def test_complete_reports_include_matching_outcome_and_rule_data():
     report = _report(config=RuleConfig(fail_fullscan_steps=1, fail_vm_steps=8))
     payload = run_report_to_dict(report)
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["rules"]["enabled"] is True
+    assert payload["instrumentation"]["sql_capture_limit"] == 4096
     assert [item["rule"] for item in payload["rules"]["violations"]] == ["FULLSCAN_STEPS", "VM_STEPS"]
     assert [item["observed"] for item in payload["rules"]["violations"]] == [2, 9]
     assert payload["outcome"] == {
         "application_failure": False,
         "instrumentation_failure": False,
         "performance_rule_failure": True,
+        "evaluation_incomplete": False,
         "exit_code": 1,
     }
     rendered = render_run_json(report)
@@ -102,7 +106,10 @@ def test_json_schema_is_stable_utf8_and_deterministic():
         "observed_executions": 1, "metric_bearing_executions": 1, "unique_scoped_queries": 1,
     }
     query = payload["queries"][0]
-    assert query["scope"] == {"pid": 7, "module": "sqlite", "database": "0x2"}
+    assert query["scope"] == {
+        "pid": 7, "module": "sqlite", "module_path": "",
+        "module_base": "0x0", "database": "0x2",
+    }
     assert query["fullscan_steps"] == {"total": 2, "max": 2}
     assert query["signals"] == ["FULL_SCAN", "SORT"]
     rendered = render_json(analysis)

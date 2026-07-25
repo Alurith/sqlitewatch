@@ -2,7 +2,7 @@
 name = "sqlitewatch"
 version = "0.1.0"
 description = "Passive SQLite runtime instrumentation proof of concept"
-readme = "poc-plan.md"
+readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "frida==17.16.1",

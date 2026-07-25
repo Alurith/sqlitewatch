@@ -6,6 +6,11 @@ dist/
 *.egg-info/
 fixtures/c_dynamic/fixture
 fixtures/c_dynamic/fixture-late
+fixtures/c_dynamic/fixture-long
+fixtures/c_dynamic/fixture-abrupt
+fixtures/c_dynamic/fixture-page-boundary
+fixtures/c_multi_module/fixture
+fixtures/c_multi_module/*.so
 fixtures/c_embedded/fixture-sqlite-embedded
 fixtures/c_embedded/fixture-sqlite-embedded-stripped
 fixtures/node_binding/node_modules/

@@ -5,6 +5,29 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Any
+
+
+def write_utf8_stream(stream: Any, content: str) -> None:
+    """Write UTF-8 regardless of a stdio text wrapper's ambient encoding."""
+    data = content.encode("utf-8")
+    binary = getattr(stream, "buffer", None)
+    if binary is not None and hasattr(binary, "write"):
+        binary.write(data)
+        binary.flush()
+        return
+    try:
+        stream.write(content)
+        stream.flush()
+        return
+    except UnicodeEncodeError:
+        # Embedded callers may expose a text wrapper without ``buffer`` but
+        # still provide a real descriptor.
+        descriptor = stream.fileno()
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
 
 
 def write_report(path: Path, content: str) -> None:

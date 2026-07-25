@@ -61,10 +61,12 @@ def _reason_from_result(result: RunResult) -> str | None:
     return "; ".join(_unique(errors)) or None
 
 
-def _symbols_by_module(detections: Sequence[SqliteDetected]) -> dict[str, set[str]]:
-    found: dict[str, set[str]] = {}
+def _symbols_by_module(
+    detections: Sequence[SqliteDetected],
+) -> dict[tuple[str, str], set[str]]:
+    found: dict[tuple[str, str], set[str]] = {}
     for event in detections:
-        found.setdefault(event.module, set()).add(event.symbol)
+        found.setdefault((event.path, event.base), set()).add(event.symbol)
     return found
 
 
@@ -82,6 +84,18 @@ def _metrics_active(detections: Sequence[SqliteDetected]) -> bool:
         and set(METRIC_SYMBOLS).issubset(symbols)
         for symbols in _symbols_by_module(detections).values()
     )
+
+
+def _complete_module_identities(
+    detections: Sequence[SqliteDetected],
+) -> set[tuple[str, str]]:
+    return {
+        identity
+        for identity, symbols in _symbols_by_module(detections).items()
+        if bool(symbols.intersection(PREPARE_SYMBOLS))
+        and set(LIFECYCLE_SYMBOLS).issubset(symbols)
+        and set(METRIC_SYMBOLS).issubset(symbols)
+    }
 
 
 def _complete_metrics(event: StatementExecuted) -> bool:
@@ -125,6 +139,13 @@ def build_matrix_record(
     executions_observed = bool(executions)
     finalizations_observed = bool(result.finalized_statements)
     metrics_observed = bool(executions) and all(_complete_metrics(event) for event in executions)
+    complete_identities = _complete_module_identities(detections)
+    activity_supported = bool(statements) and all(
+        (event.module_path, event.module_base) in complete_identities
+        or (event.module_path == "" and event.module_base == "0x0"
+            and any(detection.module == event.module for detection in detections))
+        for event in statements
+    )
     unsupported = (
         not metrics_active
         and (result.instrumentation_status == "DETECTED_UNSUPPORTED" or any(
@@ -137,11 +158,11 @@ def build_matrix_record(
     if unsupported:
         status: MatrixStatus = "UNSUPPORTED"
         reason = reason or "SQLite lifecycle or metric symbols are unavailable"
-    elif result.instrumentation_failed or target_failed:
+    elif result.instrumentation_failed or target_failed or result.instrumentation_status != "ACTIVE":
         status = "FAIL"
         reason = reason or (f"target exited with code {result.target_exit_code}" if target_failed else "instrumentation failed")
     elif (bool(detections) and metrics_active and hook_installed and sql_captured
-          and executions_observed and finalizations_observed and metrics_observed
+          and activity_supported and executions_observed and finalizations_observed and metrics_observed
           and functional_output_ok):
         status = "PASS"
     else:
@@ -157,6 +178,8 @@ def build_matrix_record(
             missing.append("active hook")
         if not sql_captured:
             missing.append("expected SQL")
+        if not activity_supported:
+            missing.append("activity in a complete SQLite module")
         if not executions_observed:
             missing.append("statement execution")
         if not finalizations_observed:

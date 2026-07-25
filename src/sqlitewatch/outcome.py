@@ -16,6 +16,7 @@ class RunOutcome:
     application_failed: bool
     instrumentation_failed: bool
     performance_rule_failed: bool
+    evaluation_incomplete: bool
     exit_code: int
 
 
@@ -28,8 +29,10 @@ def resolve_outcome(run: RunResult, rules: RuleEvaluation) -> RunOutcome:
         run.instrumentation_failed
         or run.instrumentation_status == "FAILED"
         or (rules.config.enabled and run.instrumentation_status != "ACTIVE")
+        or (rules.config.enabled and rules.inconclusive)
     )
     performance_rule_failed = rules.failed
+    evaluation_incomplete = rules.inconclusive
 
     if instrumentation_failed:
         exit_code = 70
@@ -49,5 +52,6 @@ def resolve_outcome(run: RunResult, rules: RuleEvaluation) -> RunOutcome:
         application_failed=application_failed,
         instrumentation_failed=instrumentation_failed,
         performance_rule_failed=performance_rule_failed,
+        evaluation_incomplete=evaluation_incomplete,
         exit_code=exit_code,
     )

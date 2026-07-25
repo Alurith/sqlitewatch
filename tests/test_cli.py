@@ -42,6 +42,7 @@ def test_parser_defaults_and_json_stdout_redirection():
 
 @pytest.mark.parametrize("args", [
     ["--max-sql-length", "0", "--", "target"],
+    ["--max-sql-length", "1048577", "--", "target"],
     ["--fail-fullscan-steps", "-1", "--", "target"],
     ["--fail-vm-steps=bad", "--", "target"],
     ["--format", "yaml", "--", "target"],
@@ -65,7 +66,7 @@ def test_cli_renders_complete_json_and_preserves_nonfatal_diagnostics(monkeypatc
     assert cli.main(["--max-sql-length", "16", "--format", "json", "--", "target"]) == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["outcome"]["exit_code"] == 0
     assert "Target exited" not in captured.out
     assert "SQLiteWatch analysis" not in captured.out

@@ -411,3 +411,28 @@ Implementare nell'ordine:
 5. hook `sqlite3_prepare_v2`;
 6. fixture C dinamica;
 7. test end-to-end del primo evento SQL.
+
+---
+
+## Hardening post-audit completato
+
+Il PoC mantiene lo scope Linux x86_64/primary-process, ma i contratti operativi
+sono stati consolidati:
+
+- protocollo lifecycle v2 con identità modulo `(path, base)`, stato esplicito di
+  capture failure, start/terminal batch acknowledged e semantica corretta di
+  `nByte`/`pzTail`/UTF-8;
+- stato `PARTIAL` quando un modulo incompleto esegue attività, senza comporre
+  capability da moduli diversi;
+- regole fail-closed (`70`) per osservazioni inconclusive, con motivi nel report;
+- completion autenticata con `SO_PEERCRED` e shutdown TERM/INT→KILL bounded;
+- backend riutilizzabile tramite generazioni per-run e sequence batch resettata;
+- detach/reinstallazione degli hook su `dlclose()`/reload;
+- cattura SQL bulk e bounded, con fixture per UTF-8, page boundary e SQL lunghe;
+- reducer incrementale nel percorso CLI, cache normalizzazione LRU bounded e
+  limite esplicito per retention raw;
+- output UTF-8 indipendente dall'ambiente e escaping terminale centralizzato;
+- test Node sintattico skipped quando il toolchain opzionale non è presente.
+
+Il report pubblico usa schema 2. Contiene SQL e literal e deve essere trattato
+come artefatto potenzialmente sensibile.

@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 InstrumentationState = str
-DoctorState = Literal["FAILED", "NOT_DETECTED", "DETECTED_UNSUPPORTED", "NO_ACTIVITY", "ACTIVE"]
+DoctorState = Literal[
+    "FAILED", "NOT_DETECTED", "DETECTED_UNSUPPORTED", "NO_ACTIVITY", "PARTIAL", "ACTIVE"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,7 @@ class SqliteDetected:
     symbol: str
     address: str
     linkage: str | None = None
+    base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="sqlite_detected", init=False)
 
@@ -67,6 +70,7 @@ class ModuleCapability:
     hooks_failed: tuple[str, ...]
     reasons: tuple[str, ...]
     sqlite_version: str | None = None
+    base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="module_capability", init=False)
 
@@ -77,6 +81,7 @@ class InstrumentationStatus:
     pid: int
     hooks: int = 0
     reason: str | None = None
+    sql_capture_limit: int | None = None
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="instrumentation_status", init=False)
 
@@ -92,8 +97,29 @@ class StatementPrepared:
     sqlite_rc: int = 0
     sql_truncated: bool = False
     captured_bytes: int | None = None
+    sql_capture_failed: bool = False
+    module_path: str = ""
+    module_base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="statement_prepared", init=False)
+
+    def __post_init__(self) -> None:
+        if self.captured_bytes is None:
+            object.__setattr__(self, "captured_bytes", len(self.sql.encode("utf-8")))
+
+
+@dataclass(frozen=True, slots=True)
+class StatementStarted:
+    pid: int
+    tid: int
+    module: str
+    statement: str
+    database: str
+    execution_number: int
+    module_path: str = ""
+    module_base: str = "0x0"
+    protocol_version: int = PROTOCOL_VERSION
+    type: str = field(default="statement_started", init=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +136,8 @@ class StatementExecuted:
     vm_steps: int | None = None
     sorts: int | None = None
     autoindex: int | None = None
+    module_path: str = ""
+    module_base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="statement_executed", init=False)
 
@@ -123,6 +151,8 @@ class StatementFinalized:
     database: str
     executions: int
     sqlite_rc: int
+    module_path: str = ""
+    module_base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="statement_finalized", init=False)
 
@@ -134,6 +164,7 @@ class InstrumentationError:
     pid: int | None = None
     fatal: bool = True
     sqlite_rc: int | None = None
+    data_loss: bool = False
     protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="instrumentation_error", init=False)
 
@@ -149,8 +180,8 @@ class ProcessExited:
 
 Event: TypeAlias = (
     BackendReady | LauncherReady | SqliteDetected | ModuleCapability |
-    InstrumentationStatus | StatementPrepared | StatementExecuted |
-    StatementFinalized | InstrumentationError | ProcessExited
+    InstrumentationStatus | StatementPrepared | StatementStarted |
+    StatementExecuted | StatementFinalized | InstrumentationError | ProcessExited
 )
 
 
@@ -163,6 +194,8 @@ class RunResult:
     instrumentation_status: InstrumentationState = "NOT_DETECTED"
     instrumentation_failed: bool = False
     instrumentation_error: str | None = None
+    sql_capture_limit: int | None = None
+    events_retained: bool = True
 
     @property
     def exit_code(self) -> int:
@@ -175,6 +208,10 @@ class RunResult:
     @property
     def statements(self) -> tuple[StatementPrepared, ...]:
         return tuple(event for event in self.events if isinstance(event, StatementPrepared))
+
+    @property
+    def started_executions(self) -> tuple[StatementStarted, ...]:
+        return tuple(event for event in self.events if isinstance(event, StatementStarted))
 
     @property
     def executions(self) -> tuple[StatementExecuted, ...]:

@@ -1,5 +1,8 @@
 from pathlib import Path
+import shutil
 import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).parents[1]
@@ -20,6 +23,10 @@ def test_agent_source_has_lifecycle_registry_and_modern_frida_api():
     assert "inspectModule(modules[i], true)" in source
     assert "hookedAddresses" in source
     assert "hookedSymbolNames" in source
+    assert "listener.detach()" in source
+    assert "moduleBase(module)" in source
+    assert "readByteArray" in source
+    assert ".add(i).readU8()" not in source
     for symbol in (
         "sqlite3_prepare_v2",
         "sqlite3_prepare_v3",
@@ -48,6 +55,7 @@ def test_backend_uses_only_the_controller_buffer():
     assert "from queue import Queue" not in source
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="optional Node toolchain is unavailable")
 def test_agent_source_parses_with_node():
     completed = subprocess.run(["node", "--check", str(AGENT)], cwd=ROOT)
     assert completed.returncode == 0

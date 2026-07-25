@@ -1,7 +1,7 @@
 "use strict";
 
 // This file runs in Frida's JavaScript runtime, not Node.js.
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const SQLITE_OK = 0, SQLITE_BUSY = 5, SQLITE_LOCKED = 6, SQLITE_ROW = 100, SQLITE_DONE = 101;
 const SQLITE_STMTSTATUS_FULLSCAN_STEP = 1, SQLITE_STMTSTATUS_SORT = 2;
 const SQLITE_STMTSTATUS_AUTOINDEX = 3, SQLITE_STMTSTATUS_VM_STEP = 4;
@@ -27,6 +27,8 @@ let lifecycleSequence = 0;
 let hookCount = 0;
 let transportFailed = false;
 let statusSent = false;
+let completeActivityObserved = false;
+let partialCoverageReason = null;
 let observer;
 
 function emitNow(type, fields) {
@@ -35,36 +37,54 @@ function emitNow(type, fields) {
   catch (_) { transportFailed = true; }
 }
 
-function fail(phase, error, fatal) {
-  emitNow("instrumentation_error", { phase: phase, message: String(error), pid: Process.id, fatal: fatal !== false });
+function fail(phase, error, fatal, dataLoss) {
+  emitNow("instrumentation_error", {
+    phase: phase, message: String(error), pid: Process.id,
+    fatal: fatal !== false, data_loss: dataLoss === true
+  });
 }
 
-function queueLifecycle(type, fields) {
+function queueLifecycle(type, fields, deferFlush) {
   if (transportFailed) return;
   if (lifecycleQueue.length >= MAX_LIFECYCLE_QUEUE) {
     transportFailed = true;
-    fail("transport", "lifecycle queue overflow", true);
+    fail("transport", "lifecycle queue overflow", true, true);
     return;
   }
   lifecycleQueue.push(Object.assign({ type: type, protocol_version: PROTOCOL_VERSION }, fields));
-  if (lifecycleQueue.length >= 64) flushLifecycle();
+  if (lifecycleQueue.length >= 64 && deferFlush !== true) flushLifecycle();
 }
 
-function flushLifecycle() {
+function flushLifecycle(waitForAck) {
   if (transportFailed || lifecycleQueue.length === 0) return;
   const events = lifecycleQueue.splice(0, lifecycleQueue.length);
+  const sequence = ++lifecycleSequence;
+  const ackRequired = waitForAck === true;
+  let acknowledgement = null, acknowledged = false;
+  if (ackRequired) {
+    acknowledgement = recv("sqlitewatch_ack", function (message) {
+      acknowledged = message && message.payload && message.payload.sequence === sequence;
+    });
+  }
   try {
-    send({ type: "lifecycle_batch", protocol_version: PROTOCOL_VERSION, sequence: ++lifecycleSequence, events: events });
+    send({ type: "lifecycle_batch", protocol_version: PROTOCOL_VERSION, sequence: sequence, ack_required: ackRequired, events: events });
+    if (acknowledgement !== null) {
+      acknowledgement.wait();
+      if (!acknowledged) throw new Error("invalid lifecycle acknowledgement for sequence " + sequence);
+      emitNow("lifecycle_acknowledged", { sequence: sequence });
+    }
   } catch (error) {
     transportFailed = true;
-    fail("transport", "lifecycle batch send failed: " + String(error), true);
+    fail("transport", "lifecycle batch send failed: " + String(error), true, true);
   }
 }
 setInterval(flushLifecycle, 25);
 
 function pointerString(pointer) { return pointer.toString().toLowerCase(); }
 function moduleName(module) { return module.name || "<anonymous>"; }
-function moduleKey(module) { return module.path || moduleName(module); }
+function modulePath(module) { return module.path || ""; }
+function moduleBase(module) { return pointerString(module.base); }
+function moduleKey(module) { return (modulePath(module) || moduleName(module)) + "@" + moduleBase(module); }
 function linkageFor(module) {
   const basename = (module.path || "").split("/").pop().toLowerCase();
   return /^libsqlite3\.so(?:\..*)?$/.test(basename) || basename === "libsqlite3.dylib" || basename === "sqlite3.dll" ? "dynamic" : "embedded_or_unknown";
@@ -88,11 +108,21 @@ function findSymbol(module, name) {
 }
 
 function reportDetected(module, name, address) {
-  emitNow("sqlite_detected", { pid: Process.id, module: moduleName(module), path: module.path || "", symbol: name, address: pointerString(address), linkage: linkageFor(module) });
+  emitNow("sqlite_detected", { pid: Process.id, module: moduleName(module), path: modulePath(module), base: moduleBase(module), symbol: name, address: pointerString(address), linkage: linkageFor(module) });
 }
 
 function emptyRecord(module, scanned) {
-  return { module: module, candidate: isSqliteCandidate(module), scanned: scanned, symbols: new Map(), metricReader: null, hooksAttempted: new Set(), hooksInstalled: new Set(), hooksFailed: new Set(), reasons: new Set(), sqliteVersion: null };
+  return {
+    module: module, key: moduleKey(module), candidate: isSqliteCandidate(module), scanned: scanned,
+    symbols: new Map(), metricReader: null, hooksAttempted: new Set(), hooksInstalled: new Set(),
+    hooksFailed: new Set(), reasons: new Set(), listeners: [], activityCount: 0, sqliteVersion: null
+  };
+}
+
+function recordComplete(record) {
+  return PREPARE.some(name => record.hooksInstalled.has(name))
+    && LIFECYCLE.every(name => record.hooksInstalled.has(name))
+    && record.metricReader !== null;
 }
 
 function moduleReasons(record) {
@@ -115,7 +145,7 @@ function emitCapability(record) {
   const present = sorted(record.symbols.keys());
   const missing = SYMBOLS.filter(name => present.indexOf(name) === -1).sort();
   emitNow("module_capability", {
-    pid: Process.id, module: moduleName(record.module), path: record.module.path || "", linkage: linkageFor(record.module), candidate: record.candidate, scanned: record.scanned,
+    pid: Process.id, module: moduleName(record.module), path: modulePath(record.module), base: moduleBase(record.module), linkage: linkageFor(record.module), candidate: record.candidate, scanned: record.scanned,
     symbols_present: present, symbols_missing: missing, metric_reader: record.metricReader !== null,
     hooks_attempted: sorted(record.hooksAttempted), hooks_installed: sorted(record.hooksInstalled), hooks_failed: sorted(record.hooksFailed),
     reasons: moduleReasons(record), sqlite_version: record.sqliteVersion
@@ -130,7 +160,8 @@ function installHook(module, name, address, handlers, record) {
   }
   hookedAddresses.add(addressKey); hookedSymbolNames.add(nameKey);
   try {
-    Interceptor.attach(address, handlers);
+    const listener = Interceptor.attach(address, handlers);
+    record.listeners.push({ listener: listener, addressKey: addressKey, nameKey: nameKey, name: name });
     hookCount++; record.hooksInstalled.add(name); reportDetected(module, name, address); return true;
   } catch (error) {
     hookedAddresses.delete(addressKey); hookedSymbolNames.delete(nameKey);
@@ -139,36 +170,120 @@ function installHook(module, name, address, handlers, record) {
   }
 }
 
+function failedSqlCapture() {
+  return { sql: "", sql_truncated: false, captured_bytes: 0, sql_capture_failed: true };
+}
+
+function readBulkUntilNul(pointer, limit) {
+  const chunks = [];
+  let offset = 0, length = 0;
+  while (offset < limit) {
+    const current = pointer.add(offset);
+    let chunkLength = Math.min(16384, limit - offset);
+    const range = Process.findRangeByAddress(current);
+    if (range === null) throw new Error("SQL pointer is outside readable memory");
+    const rangeRemaining = range.base.add(range.size).sub(current).toUInt32();
+    if (rangeRemaining === 0) throw new Error("SQL pointer reached the end of a memory range");
+    chunkLength = Math.min(chunkLength, rangeRemaining);
+    const buffer = current.readByteArray(chunkLength);
+    if (buffer === null) throw new Error("SQL bulk read returned no data");
+    const chunk = new Uint8Array(buffer);
+    const nul = chunk.indexOf(0);
+    const payload = nul < 0 ? chunk : chunk.subarray(0, nul);
+    if (payload.length > 0) { chunks.push(payload); length += payload.length; }
+    if (nul >= 0) return { chunks: chunks, length: length, nulFound: true };
+    offset += chunk.length;
+  }
+  return { chunks: chunks, length: length, nulFound: false };
+}
+
+function flattenChunks(chunks, length) {
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    if (offset >= length) break;
+    const portion = chunk.subarray(0, Math.min(chunk.length, length - offset));
+    result.set(portion, offset);
+    offset += portion.length;
+  }
+  return result;
+}
+
+function validUtf8PrefixLength(bytes, allowIncompleteTail) {
+  let index = 0;
+  while (index < bytes.length) {
+    const lead = bytes[index];
+    if (lead <= 0x7f) { index++; continue; }
+    let width, secondMin = 0x80, secondMax = 0xbf;
+    if (lead >= 0xc2 && lead <= 0xdf) width = 2;
+    else if (lead >= 0xe0 && lead <= 0xef) {
+      width = 3;
+      if (lead === 0xe0) secondMin = 0xa0;
+      if (lead === 0xed) secondMax = 0x9f;
+    } else if (lead >= 0xf0 && lead <= 0xf4) {
+      width = 4;
+      if (lead === 0xf0) secondMin = 0x90;
+      if (lead === 0xf4) secondMax = 0x8f;
+    } else return -1;
+    if (index + width > bytes.length) return allowIncompleteTail ? index : -1;
+    if (bytes[index + 1] < secondMin || bytes[index + 1] > secondMax) return -1;
+    for (let continuation = 2; continuation < width; continuation++) {
+      if (bytes[index + continuation] < 0x80 || bytes[index + continuation] > 0xbf) return -1;
+    }
+    index += width;
+  }
+  return bytes.length;
+}
+
 function readSql(sqlPointer, nByte, tailPointer) {
-  if (sqlPointer === null || sqlPointer.isNull() || !Number.isInteger(nByte)) return { sql: "", sql_truncated: false, captured_bytes: 0 };
-  const ceiling = maxSqlLength + 1;
-  let available = nByte < 0 ? ceiling : Math.min(nByte, ceiling);
-  if (!Number.isSafeInteger(available) || available <= 0) return { sql: "", sql_truncated: false, captured_bytes: 0 };
+  if (sqlPointer === null || sqlPointer.isNull() || !Number.isInteger(nByte)) return failedSqlCapture();
+  const probeLimit = maxSqlLength + 1;
   try {
+    let readLimit = nByte < 0 ? probeLimit : Math.min(nByte, probeLimit);
+    let tailLength = null;
+    let tailBeyondLimit = false;
     if (tailPointer !== null && !tailPointer.isNull()) {
       const tail = tailPointer.readPointer();
-      if (tail.isNull() || tail.compare(sqlPointer) < 0) return { sql: "", sql_truncated: false, captured_bytes: 0 };
-      const distance = tail.sub(sqlPointer).toUInt32();
-      if (distance > 0) available = Math.min(available, distance);
+      if (tail.isNull() || tail.compare(sqlPointer) < 0) return failedSqlCapture();
+      if (nByte >= 0 && tail.compare(sqlPointer.add(nByte)) > 0) return failedSqlCapture();
+      if (tail.compare(sqlPointer.add(probeLimit)) > 0) {
+        tailBeyondLimit = true;
+        readLimit = probeLimit;
+      } else {
+        tailLength = tail.sub(sqlPointer).toUInt32();
+        readLimit = Math.min(readLimit, tailLength);
+      }
     }
-    const bytes = [];
-    for (let i = 0; i < available; i++) { const byte = sqlPointer.add(i).readU8(); if (byte === 0) break; bytes.push(byte); }
-    const truncated = bytes.length === available && (nByte < 0 || nByte > maxSqlLength);
-    let length = Math.min(bytes.length, maxSqlLength);
-    while (length > 0 && (bytes[length - 1] & 0xc0) === 0x80) length--;
-    const scratch = Memory.alloc(length + 1);
-    scratch.writeByteArray(new Uint8Array(bytes.slice(0, length))); scratch.add(length).writeU8(0);
-    return { sql: scratch.readUtf8String(length), sql_truncated: truncated, captured_bytes: length };
+    if (!Number.isSafeInteger(readLimit) || readLimit < 0) return failedSqlCapture();
+    if (readLimit === 0) return { sql: "", sql_truncated: false, captured_bytes: 0, sql_capture_failed: false };
+
+    const read = readBulkUntilNul(sqlPointer, readLimit);
+    const truncated = !read.nulFound && (
+      tailBeyondLimit
+      || (tailLength !== null && tailLength > maxSqlLength)
+      || (tailLength === null && (nByte < 0 || nByte > maxSqlLength))
+    );
+    const captured = flattenChunks(read.chunks, Math.min(read.length, maxSqlLength));
+    const utf8Length = validUtf8PrefixLength(captured, truncated);
+    if (utf8Length < 0) return failedSqlCapture();
+    const validBytes = captured.subarray(0, utf8Length);
+    if (validBytes.length === 0) return { sql: "", sql_truncated: truncated, captured_bytes: 0, sql_capture_failed: false };
+    const scratch = Memory.alloc(validBytes.length + 1);
+    scratch.writeByteArray(new Uint8Array(validBytes));
+    scratch.add(validBytes.length).writeU8(0);
+    const sql = scratch.readUtf8String(validBytes.length);
+    if (typeof sql !== "string") return failedSqlCapture();
+    return { sql: sql, sql_truncated: truncated, captured_bytes: validBytes.length, sql_capture_failed: false };
   } catch (_) {
     // A target-owned pointer is never dereferenced again after a failed read.
-    return { sql: "", sql_truncated: false, captured_bytes: 0 };
+    return failedSqlCapture();
   }
 }
 
 function contextKey(statement) { return Process.id + ":" + pointerString(statement); }
 function lookupContext(statement) { return statement === null || statement.isNull() ? null : statementContexts.get(contextKey(statement)) || null; }
 function removeContext(statement) { if (statement !== null && !statement.isNull()) statementContexts.delete(contextKey(statement)); }
-function dataQuality(context, reason) { fail("data_quality", reason + " for " + context.statement, false); }
+function dataQuality(context, reason) { fail("data_quality", reason + " for " + context.statement, false, true); }
 
 function snapshot(context, statement) {
   if (context.metricReader === null) return null;
@@ -188,8 +303,24 @@ function executionMetrics(context, statement) {
 function finishActiveExecution(context, tid, boundary, metrics) {
   if (context.activeExecutionNumber === null) return;
   const values = metrics || { fullscan_steps: null, vm_steps: null, sorts: null, autoindex: null };
-  queueLifecycle("statement_executed", { pid: Process.id, tid: tid, module: context.module, statement: context.statement, database: context.database, execution_number: context.activeExecutionNumber, sqlite_rc: context.lastStepRc === null ? SQLITE_OK : context.lastStepRc, boundary: boundary, fullscan_steps: values.fullscan_steps, vm_steps: values.vm_steps, sorts: values.sorts, autoindex: values.autoindex });
+  queueLifecycle("statement_executed", {
+    pid: Process.id, tid: tid, module: context.module, module_path: context.modulePath,
+    module_base: context.moduleBase, statement: context.statement, database: context.database,
+    execution_number: context.activeExecutionNumber,
+    sqlite_rc: context.lastStepRc === null ? SQLITE_OK : context.lastStepRc, boundary: boundary,
+    fullscan_steps: values.fullscan_steps, vm_steps: values.vm_steps, sorts: values.sorts, autoindex: values.autoindex
+  }, true);
   context.activeExecutionNumber = null; context.lastStepRc = null; context.ownerTid = null; context.stepDepth = 0;
+  flushLifecycle(true);
+}
+
+function markActivity(record) {
+  const previous = currentStatus().status;
+  record.activityCount++;
+  if (recordComplete(record)) completeActivityObserved = true;
+  else partialCoverageReason = "SQLite activity observed in incomplete module " + record.key + ": "
+    + (moduleReasons(record)[0] || "capability incomplete");
+  if (statusSent && currentStatus().status !== previous) sendStatus();
 }
 
 function installPrepare(module, address, abi, metricReader, record) {
@@ -199,18 +330,69 @@ function installPrepare(module, address, abi, metricReader, record) {
       if (retval.toInt32() !== SQLITE_OK || this.ppStmt === null || this.ppStmt.isNull()) return;
       try {
         const statement = this.ppStmt.readPointer(); if (statement.isNull()) return;
-        const captured = readSql(this.sql, this.nByte, this.tail);
-        const context = { statement: pointerString(statement), database: pointerString(this.db), module: moduleName(module), metricReader: metricReader, lastMetrics: null, nextExecutionNumber: 0, activeExecutionNumber: null, lastStepRc: null, ownerTid: null, stepDepth: 0 };
+        const captured = doctor
+          ? { sql: "", sql_truncated: false, captured_bytes: 0, sql_capture_failed: false }
+          : readSql(this.sql, this.nByte, this.tail);
+        const context = {
+          statement: pointerString(statement), database: pointerString(this.db), module: moduleName(module),
+          modulePath: modulePath(module), moduleBase: moduleBase(module), moduleKey: moduleKey(module),
+          metricReader: metricReader, lastMetrics: null, nextExecutionNumber: 0,
+          activeExecutionNumber: null, lastStepRc: null, ownerTid: null, stepDepth: 0
+        };
         context.lastMetrics = snapshot(context, statement); statementContexts.set(contextKey(statement), context);
-        queueLifecycle("statement_prepared", { pid: Process.id, tid: this.tid, module: context.module, statement: context.statement, database: context.database, sql: captured.sql, sqlite_rc: SQLITE_OK, sql_truncated: captured.sql_truncated, captured_bytes: captured.captured_bytes });
-      } catch (error) { fail("statement_pointer", error, false); }
+        markActivity(record);
+        queueLifecycle("statement_prepared", {
+          pid: Process.id, tid: this.tid, module: context.module, module_path: context.modulePath,
+          module_base: context.moduleBase, statement: context.statement, database: context.database,
+          sql: captured.sql, sqlite_rc: SQLITE_OK, sql_truncated: captured.sql_truncated,
+          captured_bytes: captured.captured_bytes, sql_capture_failed: captured.sql_capture_failed
+        }, doctor);
+        if (doctor) flushLifecycle(true);
+      } catch (error) { fail("statement_pointer", error, false, true); }
     }
   }, record);
 }
 function installStep(module, address, record) {
   return installHook(module, "sqlite3_step", address, {
-    onEnter(args) { this.statement = args[0]; this.tid = Process.getCurrentThreadId(); this.statementContext = lookupContext(this.statement); if (this.statementContext && this.statementContext.ownerTid !== null && this.statementContext.ownerTid !== this.tid) { dataQuality(this.statementContext, "concurrent statement ownership conflict"); this.statementContext = null; } else if (this.statementContext) { this.statementContext.ownerTid = this.tid; this.statementContext.stepDepth++; } },
-    onLeave(retval) { const context = this.statementContext; if (!context) return; context.stepDepth--; if (context.stepDepth > 0) { dataQuality(context, "reentrant sqlite3_step"); return; } if (context.activeExecutionNumber === null) context.activeExecutionNumber = ++context.nextExecutionNumber; const rc = retval.toInt32(); context.lastStepRc = rc; if (rc === SQLITE_ROW || rc === SQLITE_BUSY || rc === SQLITE_LOCKED) return; finishActiveExecution(context, this.tid, rc === SQLITE_DONE ? "done" : "error", executionMetrics(context, this.statement)); }
+    onEnter(args) {
+      this.statement = args[0]; this.tid = Process.getCurrentThreadId();
+      this.statementContext = lookupContext(this.statement);
+      if (this.statementContext && this.statementContext.ownerTid !== null && this.statementContext.ownerTid !== this.tid) {
+        dataQuality(this.statementContext, "concurrent statement ownership conflict");
+        this.statementContext = null;
+      } else if (this.statementContext) {
+        this.statementContext.ownerTid = this.tid;
+        this.statementContext.stepDepth++;
+        if (this.statementContext.activeExecutionNumber === null) {
+          this.statementContext.activeExecutionNumber = ++this.statementContext.nextExecutionNumber;
+          queueLifecycle("statement_started", {
+            pid: Process.id, tid: this.tid, module: this.statementContext.module,
+            module_path: this.statementContext.modulePath,
+            module_base: this.statementContext.moduleBase,
+            statement: this.statementContext.statement,
+            database: this.statementContext.database,
+            execution_number: this.statementContext.activeExecutionNumber
+          }, true);
+          flushLifecycle(true);
+        }
+      }
+    },
+    onLeave(retval) {
+      const context = this.statementContext;
+      if (!context) return;
+      context.stepDepth--;
+      if (context.stepDepth > 0) { dataQuality(context, "reentrant sqlite3_step"); return; }
+      const rc = retval.toInt32();
+      context.lastStepRc = rc;
+      if (rc === SQLITE_ROW || rc === SQLITE_BUSY || rc === SQLITE_LOCKED) {
+        flushLifecycle();
+        return;
+      }
+      finishActiveExecution(
+        context, this.tid, rc === SQLITE_DONE ? "done" : "error",
+        executionMetrics(context, this.statement)
+      );
+    }
   }, record);
 }
 function installReset(module, address, record) {
@@ -222,7 +404,7 @@ function installReset(module, address, record) {
 function installFinalize(module, address, record) {
   return installHook(module, "sqlite3_finalize", address, {
     onEnter(args) { this.statement = args[0]; this.tid = Process.getCurrentThreadId(); this.statementContext = lookupContext(this.statement); this.metrics = this.statementContext && this.statementContext.activeExecutionNumber !== null ? executionMetrics(this.statementContext, this.statement) : null; },
-    onLeave(retval) { try { if (!this.statementContext) return; finishActiveExecution(this.statementContext, this.tid, "finalize", this.metrics); queueLifecycle("statement_finalized", { pid: Process.id, tid: this.tid, module: this.statementContext.module, statement: this.statementContext.statement, database: this.statementContext.database, executions: this.statementContext.nextExecutionNumber, sqlite_rc: retval.toInt32() }); } finally { removeContext(this.statement); flushLifecycle(); } }
+    onLeave(retval) { try { if (!this.statementContext) return; finishActiveExecution(this.statementContext, this.tid, "finalize", this.metrics); queueLifecycle("statement_finalized", { pid: Process.id, tid: this.tid, module: this.statementContext.module, module_path: this.statementContext.modulePath, module_base: this.statementContext.moduleBase, statement: this.statementContext.statement, database: this.statementContext.database, executions: this.statementContext.nextExecutionNumber, sqlite_rc: retval.toInt32() }); } finally { removeContext(this.statement); flushLifecycle(); } }
   }, record);
 }
 HOOKS.sqlite3_prepare_v2 = (m, a, r, record) => installPrepare(m, a, { name: "sqlite3_prepare_v2", db: 0, sql: 1, nByte: 2, ppStmt: 3, tail: 4 }, r, record);
@@ -252,22 +434,52 @@ function inspectModule(module, allowUnknown) {
 }
 function currentStatus() {
   const records = Array.from(moduleRecords.values());
-  const active = records.some(record => PREPARE.some(name => record.hooksInstalled.has(name)) && LIFECYCLE.every(name => record.hooksInstalled.has(name)) && record.metricReader !== null);
   if (transportFailed) return { status: "FAILED", reason: "lifecycle transport failed" };
-  if (active) return { status: "ACTIVE", reason: null };
+  if (partialCoverageReason !== null) return { status: "PARTIAL", reason: partialCoverageReason };
+  if (completeActivityObserved || records.some(record => recordComplete(record))) return { status: "ACTIVE", reason: null };
   if (records.some(record => record.candidate || record.symbols.size)) return { status: "DETECTED_UNSUPPORTED", reason: moduleReasons(records.find(record => record.candidate || record.symbols.size))[0] || "SQLite capability incomplete" };
   return { status: "NOT_DETECTED", reason: "SQLite lifecycle/metric symbols not found in loaded modules" };
 }
-function sendStatus() { const value = currentStatus(); emitNow("instrumentation_status", { pid: Process.id, status: value.status, hooks: hookCount, reason: value.reason }); statusSent = true; }
+function sendStatus() {
+  const value = currentStatus();
+  emitNow("instrumentation_status", {
+    pid: Process.id, status: value.status, hooks: hookCount, reason: value.reason,
+    sql_capture_limit: maxSqlLength
+  });
+  statusSent = true;
+}
+
+function removeModule(module) {
+  const key = moduleKey(module), record = moduleRecords.get(key);
+  if (!record) return;
+  let ambiguousContexts = 0;
+  for (const [contextKeyValue, context] of statementContexts.entries()) {
+    if (context.moduleKey === key) {
+      if (context.activeExecutionNumber !== null || context.ownerTid !== null || context.stepDepth > 0) ambiguousContexts++;
+      statementContexts.delete(contextKeyValue);
+    }
+  }
+  if (ambiguousContexts > 0) fail("module_unload", "module unloaded with " + ambiguousContexts + " active statement context(s): " + key, true, true);
+  for (const installed of record.listeners) {
+    try { installed.listener.detach(); }
+    catch (error) { fail("module_unload", "hook detach failed for " + installed.name + ": " + String(error), true, true); }
+    hookedAddresses.delete(installed.addressKey);
+    hookedSymbolNames.delete(installed.nameKey);
+    hookCount = Math.max(0, hookCount - 1);
+  }
+  inspectedModules.delete(key);
+  moduleRecords.delete(key);
+  if (statusSent) sendStatus();
+}
 function start() {
-  if (Process.platform !== "linux" || Process.arch !== "x64" || Process.pointerSize !== 8) { fail("platform", "PoC supports only Linux x86_64 with 8-byte pointers", true); emitNow("instrumentation_status", { pid: Process.id, status: "FAILED", hooks: 0, reason: "unsupported platform" }); return; }
+  if (Process.platform !== "linux" || Process.arch !== "x64" || Process.pointerSize !== 8) { fail("platform", "PoC supports only Linux x86_64 with 8-byte pointers", true); emitNow("instrumentation_status", { pid: Process.id, status: "FAILED", hooks: 0, reason: "unsupported platform", sql_capture_limit: maxSqlLength }); return; }
   try {
     observer = Process.attachModuleObserver({
       onAdded: function (module) { inspectModule(module, false); if (statusSent) sendStatus(); },
-      onRemoved: function (module) { inspectedModules.delete(moduleKey(module)); moduleRecords.delete(moduleKey(module)); }
+      onRemoved: removeModule
     });
     const modules = Process.enumerateModules(); for (let i = 0; i < modules.length; i++) inspectModule(modules[i], true);
     sendStatus(); emitNow("backend_ready", { pid: Process.id, arch: Process.arch, platform: Process.platform });
-  } catch (error) { fail("discovery", error, true); emitNow("instrumentation_status", { pid: Process.id, status: "FAILED", hooks: hookCount, reason: String(error) }); }
+  } catch (error) { fail("discovery", error, true); emitNow("instrumentation_status", { pid: Process.id, status: "FAILED", hooks: hookCount, reason: String(error), sql_capture_limit: maxSqlLength }); }
 }
 start();

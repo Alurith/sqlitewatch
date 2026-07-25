@@ -1532,3 +1532,75 @@ sqlitewatch --fail-fullscan-steps 10000 -- pytest
 ```
 
 without SQLiteWatch needing to know what Django, Python, pytest, or the application's ORM are.
+
+# 38. Reliability contracts after the audit
+
+## 38.1 SQL capture and protocol v2
+
+Agent and controller use protocol version 2. Every lifecycle event carries the
+module path and base address, so capability and activity are correlated to one
+loaded module instance rather than a basename. `statement_prepared` also carries
+`sql_capture_failed`, `sql_truncated`, and the exact UTF-8 `captured_bytes`.
+These states are mutually coherent and a failed read is never represented as a
+valid empty query. Before entering the first `sqlite3_step` of an execution, the
+agent emits `statement_started` and waits for a controller acknowledgement of
+the validated batch. Terminal execution batches are acknowledged as well. A
+host-side watchdog converts a missing acknowledgement confirmation into fatal
+transport failure instead of allowing an unbounded target stall. An abrupt
+`exit_group` can therefore leave an explicit unfinished execution, but
+cannot silently erase expensive work and produce a false CI pass.
+
+SQL is read in bounded bulk chunks. A valid `pzTail` marks the logical end of a
+complete statement; it is not itself evidence of truncation. Capture validates
+UTF-8, removes only an incomplete trailing code point when the configured limit
+cuts a sequence, and respects readable mapping boundaries. Doctor skips SQL
+text capture because it needs only module-correlated activity. The effective
+capture limit is included in normal reports.
+
+## 38.2 Complete evaluation and per-module coverage
+
+Analysis exposes `evaluation_complete` and stable incomplete-reason codes. Null
+metrics, unmatched executions, truncated SQL, capture failure, and conflicting
+payloads, unfinished starts, and agent errors explicitly marked `data_loss` are lossy.
+With any rule enabled they produce instrumentation failure `70`, while preserving
+any performance violations already found. Without rules they are report warnings.
+Identical duplicates remain non-lossy diagnostics. Different terminal boundaries
+for the same execution number are conflicting payloads.
+
+A complete but unused SQLite module cannot certify an incomplete active module.
+The agent persists `PARTIAL` after activity is observed on an incomplete module;
+Doctor independently matches prepares against `(path, base)` capability records
+and reports complete and incomplete activity counts.
+
+## 38.3 Process, IPC, and backend lifecycle
+
+The completion AF_UNIX connection is authenticated with Linux `SO_PEERCRED`.
+Only the expected launcher PID running under the controller UID may submit a
+completion or launch-failure record. Shutdown is centralized and bounded:
+TERM/INT is sent through the launcher, then the target is killed directly if
+needed, the launcher is allowed to reap and report it, and the launcher is
+killed only as a final fallback. Process start tokens from `/proc` prevent PID
+reuse from being mistaken for a surviving process. Cleanup diagnostics are
+secondary and never replace the original failure.
+
+A Frida backend has an explicit per-run generation. Batch sequence numbers reset
+to one, stale callbacks are ignored, the child-added listener is registered once,
+and detach clears all run-owned references. Agent hook listeners are stored per
+module and detached on unload; address/name deduplication and statement contexts
+are cleared so a later load can be hooked again.
+
+## 38.4 Bounded analysis and safe output
+
+The normal CLI feeds lifecycle events to an incremental reducer and does not
+retain the raw lifecycle stream. Tracking keeps a bounded duplicate window per
+active statement; aggregation memory is proportional to active statements and
+unique scoped queries. Raw-SQL normalization uses a fixed-size LRU so formatting
+variants that collapse to one fingerprint cannot create an unbounded side cache.
+Materialized API runs retain events for compatibility but
+fail clearly at the configurable safety limit instead of growing to OOM.
+
+Reports are encoded as UTF-8 bytes independently of `PYTHONIOENCODING`. Terminal
+renderers and diagnostics escape C0/C1 controls, ESC, DEL, newlines, and Unicode
+formatting/bidirectional characters in target-controlled fields. JSON values are
+not terminal-escaped. Reports contain SQL text and must be handled as potentially
+sensitive artifacts.

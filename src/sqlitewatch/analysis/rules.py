@@ -45,10 +45,25 @@ class RuleViolation:
 class RuleEvaluation:
     config: RuleConfig
     violations: tuple[RuleViolation, ...]
+    evaluation_complete: bool = True
+    incomplete_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.evaluation_complete != (not self.incomplete_reasons):
+            raise ValueError("rule evaluation completeness and reasons disagree")
 
     @property
     def failed(self) -> bool:
+        """Whether one or more performance thresholds were violated."""
         return bool(self.violations)
+
+    @property
+    def inconclusive(self) -> bool:
+        return not self.evaluation_complete
+
+    @property
+    def passed(self) -> bool:
+        return self.evaluation_complete and not self.failed
 
 
 def evaluate_rules(analysis: AnalysisResult, config: RuleConfig) -> RuleEvaluation:
@@ -73,7 +88,12 @@ def evaluate_rules(analysis: AnalysisResult, config: RuleConfig) -> RuleEvaluati
             violations.append(
                 RuleViolation("VM_STEPS", aggregate, aggregate.max_vm_steps, config.fail_vm_steps)
             )
-    return RuleEvaluation(config, tuple(violations))
+    return RuleEvaluation(
+        config,
+        tuple(violations),
+        evaluation_complete=analysis.evaluation_complete,
+        incomplete_reasons=analysis.incomplete_reasons,
+    )
 
 
 def _validate_threshold(name: str, value: int | None) -> None:

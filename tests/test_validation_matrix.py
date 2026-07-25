@@ -19,20 +19,33 @@ def active_result(*events, target_exit_code=0, instrumentation_failed=False):
 
 
 def detections(*symbols, module="libsqlite3.so.0"):
+    path = "/usr/lib/" + module
     return tuple(
-        SqliteDetected(123, module, "/usr/lib/libsqlite3.so.0", symbol, f"0x{1000 + i:x}", "dynamic")
+        SqliteDetected(
+            123, module, path, symbol, f"0x{1000 + i:x}", "dynamic", "0x100000",
+        )
         for i, symbol in enumerate(symbols)
     )
 
 
 def status(value="ACTIVE", hooks=5): return InstrumentationStatus(pid=123, status=value, hooks=hooks)
-def prepared(sql=SQL): return StatementPrepared(123, 123, "libsqlite3.so.0", "0x2000", "0x3000", sql)
+def prepared(sql=SQL):
+    return StatementPrepared(
+        123, 123, "libsqlite3.so.0", "0x2000", "0x3000", sql,
+        module_path="/usr/lib/libsqlite3.so.0", module_base="0x100000",
+    )
 
 
 def lifecycle_events(metrics=METRICS):
     return (
-        StatementExecuted(123, 123, "libsqlite3.so.0", "0x2000", "0x3000", 1, 101, "done", **metrics),
-        StatementFinalized(123, 123, "libsqlite3.so.0", "0x2000", "0x3000", 1, 0),
+        StatementExecuted(
+            123, 123, "libsqlite3.so.0", "0x2000", "0x3000", 1, 101, "done",
+            **metrics, module_path="/usr/lib/libsqlite3.so.0", module_base="0x100000",
+        ),
+        StatementFinalized(
+            123, 123, "libsqlite3.so.0", "0x2000", "0x3000", 1, 0,
+            module_path="/usr/lib/libsqlite3.so.0", module_base="0x100000",
+        ),
     )
 
 

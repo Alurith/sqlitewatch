@@ -4,7 +4,7 @@
 // controller attached and enabled child gating before it is resumed.
 send({
   type: "launcher_ready",
-  protocol_version: 1,
+  protocol_version: 2,
   pid: Process.id,
   arch: Process.arch,
   platform: Process.platform

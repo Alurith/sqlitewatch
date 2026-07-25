@@ -74,6 +74,34 @@ int main(int argc, char **argv) {
     sqlite3_finalize(stmt);
     stmt = NULL;
 
+    /* A valid pzTail identifies the complete first statement; it is not a
+       truncation boundary. */
+    const char multi_sql[] = "SELECT 314159; SELECT 2";
+    const char *tail = NULL;
+    rc = sqlite3_prepare_v2(db, multi_sql, -1, &stmt, &tail);
+    if (!check(rc, db, "prepare with tail") || tail == NULL || strcmp(tail, " SELECT 2") != 0) {
+        result = 23; goto done;
+    }
+    if (!run_to_done(stmt)) { result = 24; goto done; }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    /* Valid UTF-8 code points at the final byte boundary exercise 2/3/4-byte
+       capture without relying on trailing quotes or newlines. */
+    const char *utf8_sql[] = {
+        "SELECT 1 AS café",
+        "SELECT 1 AS 中",
+        "SELECT 1 AS 😀",
+    };
+    for (size_t i = 0; i < sizeof(utf8_sql) / sizeof(utf8_sql[0]); i++) {
+        rc = sqlite3_prepare_v2(db, utf8_sql[i], -1, &stmt, NULL);
+        if (!check(rc, db, "prepare utf8 boundary") || !run_to_done(stmt)) {
+            result = 25; goto done;
+        }
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+    }
+
     /* Controlled metric workloads: properties, not version-specific totals. */
     rc = sqlite3_exec(db,
         "CREATE TABLE scan_rows (id INTEGER PRIMARY KEY, value INTEGER NOT NULL);"

@@ -1,13 +1,16 @@
+from collections import Counter
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
 from sqlitewatch.analysis import analyze_run
 from sqlitewatch.events import StatementExecuted, StatementFinalized, StatementPrepared
-from sqlitewatch.process import ProcessController
+from sqlitewatch.process import ControllerConfig, ProcessController
 from sqlitewatch.reporting import render_json, render_terminal
 from tests.integration.matrix_support import build_matrix_record
 
@@ -16,6 +19,8 @@ ROOT = Path(__file__).parents[2]
 FIXTURE_DIR = ROOT / "fixtures" / "c_dynamic"
 SQL = "SELECT name FROM users WHERE id = ?"
 V3_SQL = "SELECT 42"
+TAIL_SQL = "SELECT 314159;"
+UTF8_BOUNDARY_SQL = ("SELECT 1 AS café", "SELECT 1 AS 中", "SELECT 1 AS 😀")
 SCAN_SQL = "SELECT value FROM scan_rows WHERE value = ?"
 SORT_SQL = "SELECT value FROM scan_rows ORDER BY value DESC"
 AUTOINDEX_SQL = "SELECT count(*) FROM join_left AS l JOIN join_right AS r ON l.join_key = r.join_key WHERE l.payload = ?"
@@ -52,6 +57,14 @@ def test_dynamic_fixture_is_instrumented(native_tools_available):
     prepared = [event for event in result.events if isinstance(event, StatementPrepared)]
     assert any(event.sql == SQL for event in prepared)
     assert any(event.sql == V3_SQL for event in prepared)
+    tail_statement = next(event for event in prepared if event.sql == TAIL_SQL)
+    assert not tail_statement.sql_truncated
+    assert not tail_statement.sql_capture_failed
+    for sql in UTF8_BOUNDARY_SQL:
+        statement = next(event for event in prepared if event.sql == sql)
+        assert statement.captured_bytes == len(sql.encode("utf-8"))
+        assert not statement.sql_truncated
+        assert not statement.sql_capture_failed
 
     scan_executions = _execution_for_sql(result, SCAN_SQL)
     assert len(scan_executions) == 2
@@ -91,6 +104,10 @@ def test_dynamic_fixture_is_instrumented(native_tools_available):
     assert autoindex_aggregate.total_autoindex > 0
     assert SCAN_SQL in render_terminal(analysis)
     assert SCAN_SQL in render_json(analysis)
+    assert next(
+        aggregate for aggregate in analysis.aggregates
+        if aggregate.normalized_sql == TAIL_SQL
+    ).executions == 1
 
     record = build_matrix_record(
         scenario="c-dynamic", command=command, result=result,
@@ -100,6 +117,116 @@ def test_dynamic_fixture_is_instrumented(native_tools_available):
     assert record.linkage == "dynamic"
     assert record.prepared_v2 and record.prepared_v3
     assert record.metrics_active and record.metrics_observed
+
+
+@pytest.mark.integration
+def test_abrupt_exit_after_row_is_inconclusive_not_false_rule_pass(native_tools_available):
+    subprocess.run(["make", "-C", str(FIXTURE_DIR), "abrupt"], check=True)
+    target = str(FIXTURE_DIR / "fixture-abrupt")
+    for command in ([target, "fast"], [target]):
+        result = ProcessController().run(command)
+        analysis = analyze_run(result)
+        assert result.target_exit_code == 0
+        assert "UNFINISHED_EXECUTIONS" in analysis.incomplete_reasons
+
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "sqlitewatch", "--format=json",
+            "--fail-vm-steps=100", "--", target,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 70
+    assert payload["evaluation"]["complete"] is False
+    assert payload["rules"]["passed"] is False
+    assert "UNFINISHED_EXECUTIONS" in payload["rules"]["incomplete_reasons"]
+
+
+@pytest.mark.integration
+def test_sql_capture_stops_at_unreadable_page_boundary(native_tools_available):
+    subprocess.run(["make", "-C", str(FIXTURE_DIR), "page-boundary"], check=True)
+    result = ProcessController().run([str(FIXTURE_DIR / "fixture-page-boundary")])
+    statement = next(event for event in result.statements if event.sql == "SELECT 1 AS café")
+    assert result.target_exit_code == 0
+    assert not result.instrumentation_failed
+    assert not statement.sql_truncated
+    assert not statement.sql_capture_failed
+
+
+@pytest.mark.integration
+def test_long_sql_capture_uses_bounded_bulk_reads(native_tools_available):
+    subprocess.run(["make", "-C", str(FIXTURE_DIR), "long"], check=True)
+    started = time.monotonic()
+    result = ProcessController().run([str(FIXTURE_DIR / "fixture-long")])
+    elapsed = time.monotonic() - started
+    long_statements = [event for event in result.statements if len(event.sql) >= 60 * 1024]
+    assert result.target_exit_code == 0
+    assert len(long_statements) == 200
+    assert all(not event.sql_truncated for event in long_statements)
+    # The former per-byte NativePointer.readU8 loop took about 17 seconds for
+    # this workload on the reference host; bulk capture stays comfortably below.
+    assert elapsed < 10.0
+
+
+@pytest.mark.integration
+def test_tail_beyond_capture_limit_is_truncated_only_by_the_limit(native_tools_available):
+    subprocess.run(["make", "-C", str(FIXTURE_DIR)], check=True)
+    result = ProcessController().run(
+        [str(FIXTURE_DIR / "fixture")], ControllerConfig(max_sql_length=13)
+    )
+    statement = next(
+        event for event in result.statements if event.sql == "SELECT 314159"
+    )
+    assert statement.sql_truncated
+    assert not statement.sql_capture_failed
+    assert statement.captured_bytes == 13
+
+
+@pytest.mark.integration
+def test_utf8_capture_limits_never_emit_partial_codepoints(native_tools_available):
+    subprocess.run(["make", "-C", str(FIXTURE_DIR)], check=True)
+    for limit in (13, 14, 15, 16, 17):
+        result = ProcessController().run(
+            [str(FIXTURE_DIR / "fixture")],
+            ControllerConfig(max_sql_length=limit),
+        )
+        expected = Counter()
+        for sql in UTF8_BOUNDARY_SQL:
+            raw = sql.encode("utf-8")
+            captured = raw[:limit].decode("utf-8", errors="ignore")
+            expected[(captured, limit < len(raw), len(captured.encode("utf-8")))] += 1
+        observed = Counter(
+            (event.sql, event.sql_truncated, event.captured_bytes)
+            for event in result.statements
+            if event.sql.startswith("SELECT 1 AS")
+        )
+        assert observed == expected
+        assert all(
+            not event.sql_capture_failed
+            for event in result.statements
+            if event.sql.startswith("SELECT 1 AS")
+        )
+
+
+@pytest.mark.integration
+def test_stdout_is_utf8_when_ambient_python_encoding_is_ascii(native_tools_available):
+    subprocess.run(["make", "-C", str(FIXTURE_DIR)], check=True)
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "sqlitewatch", "--format=json", "--",
+            str(FIXTURE_DIR / "fixture"),
+        ],
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "ascii"},
+        check=False,
+    )
+    assert completed.returncode == 0
+    payload = json.loads(completed.stdout.decode("utf-8"))
+    assert any("café" in query["sql"] for query in payload["queries"])
+    assert b"Traceback" not in completed.stderr
 
 
 @pytest.mark.integration
@@ -150,7 +277,7 @@ def test_ci_rules_json_streams_and_target_failure_precedence(native_tools_availa
     file_payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert to_file.returncode == 1
     assert to_file.stdout == "name=Ada\n"
-    assert file_payload["schema_version"] == 1
+    assert file_payload["schema_version"] == 2
     assert file_payload["outcome"]["exit_code"] == 1
 
     no_sqlite = run_cli("--fail-fullscan-steps", "0", command=("/bin/true",))

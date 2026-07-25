@@ -21,18 +21,28 @@ def analysis_to_dict(analysis: AnalysisResult) -> dict[str, object]:
             "null_metric_executions": quality.null_metric_executions,
             "unmatched_executions": quality.unmatched_executions,
             "truncated_sql_executions": quality.truncated_sql_executions,
+            "sql_capture_failed_executions": quality.sql_capture_failed_executions,
             "duplicate_executions": quality.duplicate_executions,
             "conflicted_executions": quality.conflicted_executions,
+            "unfinished_executions": quality.unfinished_executions,
+            "instrumentation_data_loss_events": quality.instrumentation_data_loss_events,
+        },
+        "evaluation": {
+            "complete": analysis.evaluation_complete,
+            "incomplete_reasons": list(analysis.incomplete_reasons),
         },
         "instrumentation": {
             "status": analysis.instrumentation_status,
             "failed": analysis.instrumentation_failed,
+            "sql_capture_limit": analysis.sql_capture_limit,
         },
         "queries": [
             {
                 "scope": {
                     "pid": aggregate.scope.pid,
                     "module": aggregate.scope.module,
+                    "module_path": aggregate.scope.module_path,
+                    "module_base": aggregate.scope.module_base,
                     "database": aggregate.scope.database,
                 },
                 "fingerprint": aggregate.fingerprint,
@@ -65,9 +75,10 @@ def run_report_to_dict(report: ReportData) -> dict[str, object]:
     rules = report.rules
     outcome = report.outcome
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "summary": derived["summary"],
         "data_quality": derived["data_quality"],
+        "evaluation": derived["evaluation"],
         "target": {
             "exit_code": outcome.target_exit_code,
             "signal": outcome.signal,
@@ -76,10 +87,13 @@ def run_report_to_dict(report: ReportData) -> dict[str, object]:
         "instrumentation": {
             "status": outcome.instrumentation_status,
             "failed": outcome.instrumentation_failed,
+            "sql_capture_limit": report.analysis.sql_capture_limit,
         },
         "rules": {
             "enabled": rules.config.enabled,
-            "passed": not rules.failed,
+            "passed": rules.passed,
+            "inconclusive": rules.inconclusive,
+            "incomplete_reasons": list(rules.incomplete_reasons),
             "configuration": {
                 "fail_fullscan_steps": rules.config.fail_fullscan_steps,
                 "fail_vm_steps": rules.config.fail_vm_steps,
@@ -91,6 +105,8 @@ def run_report_to_dict(report: ReportData) -> dict[str, object]:
                     "scope": {
                         "pid": violation.query.scope.pid,
                         "module": violation.query.scope.module,
+                        "module_path": violation.query.scope.module_path,
+                        "module_base": violation.query.scope.module_base,
                         "database": violation.query.scope.database,
                     },
                     "fingerprint": violation.query.fingerprint,
@@ -105,6 +121,7 @@ def run_report_to_dict(report: ReportData) -> dict[str, object]:
             "application_failure": outcome.application_failed,
             "instrumentation_failure": outcome.instrumentation_failed,
             "performance_rule_failure": outcome.performance_rule_failed,
+            "evaluation_incomplete": outcome.evaluation_incomplete,
             "exit_code": outcome.exit_code,
         },
         "queries": derived["queries"],

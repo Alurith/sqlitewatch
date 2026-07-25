@@ -700,7 +700,7 @@ sqlitewatch --format json --output report.json -- pytest
 
 ### 20.1 Contratto CI implementato
 
-Il JSON CLI è un envelope versionato (`schema_version: 1`) con `summary`, `data_quality`, `target`, `instrumentation`, `rules`, `outcome` e `queries`. `target` conserva `exit_code`, `signal` e `failed`; `instrumentation` riporta stato e failure effettiva; `rules` contiene configurazione, violazioni ordinate e `passed`; `outcome` riporta separatamente application, instrumentation e performance-rule failure oltre all'exit code finale.
+Il JSON CLI è un envelope versionato (`schema_version: 2`) con `summary`, `data_quality`, `evaluation`, `target`, `instrumentation`, `rules`, `outcome` e `queries`. `target` conserva `exit_code`, `signal` e `failed`; `instrumentation` riporta stato, failure effettiva e limite di cattura; `rules` contiene configurazione, completezza, motivi, violazioni ordinate e `passed`; `outcome` riporta separatamente application, instrumentation, incompletezza e performance-rule failure oltre all'exit code finale.
 
 Le soglie fullscan e VM confrontano soltanto il massimo per singola esecuzione con confronto stretto `>`; non usano i totali. Le failure del target e delle regole possono coesistere nel report: il codice target prevale sulla sola failure performance. La precedenza completa è `74` per errori di emissione del report, `70` per instrumentation failure, `128 + signal`, exit code target non-zero, `1` per sole violazioni regole e `0` altrimenti.
 
@@ -708,7 +708,7 @@ Quando almeno una regola è configurata, `NOT_DETECTED` e `DETECTED_UNSUPPORTED`
 
 ### 20.2 Doctor e hardening implementati
 
-La sintassi Doctor è `sqlitewatch doctor [--format terminal|json] [--output FILE] -- <command>`. Il JSON è un documento Doctor distinto (`schema_version: 1`, `report_type: sqlitewatch_doctor`) e include target, inventario dei moduli, linkage, simboli, reader metriche, hook, activity, ragioni, limiti e outcome. Gli stati validi sono `FAILED`, `NOT_DETECTED`, `DETECTED_UNSUPPORTED`, `NO_ACTIVITY` e `ACTIVE`. `NO_ACTIVITY` e ogni stato non-`ACTIVE` sono failure diagnostiche (`70`); dopo `ACTIVE` valgono segnale e codice target. Un errore di writer/stdout prevale sempre con `74`.
+La sintassi Doctor è `sqlitewatch doctor [--format terminal|json] [--output FILE] -- <command>`. Il JSON è un documento Doctor distinto (`schema_version: 2`, `report_type: sqlitewatch_doctor`) e include target, inventario dei moduli con path/base, linkage, simboli, reader metriche, hook, activity completa/incompleta, ragioni, limiti e outcome. Gli stati validi sono `FAILED`, `NOT_DETECTED`, `DETECTED_UNSUPPORTED`, `NO_ACTIVITY`, `PARTIAL` e `ACTIVE`. `PARTIAL`, `NO_ACTIVITY` e ogni stato non-`ACTIVE` sono failure diagnostiche (`70`); dopo `ACTIVE` valgono segnale e codice target. Un errore di writer/stdout prevale sempre con `74`.
 
 In JSON stdout l'output target viene rediretto a stderr; con `--output` il target conserva i propri stream e il writer atomico scrive il report. L'instrumentation richiede Linux x86_64 e solo il processo parent: il child-gating viene rilasciato prima della resume del target, quindi i figli proseguono senza essere instrumentati. La discovery non applica scansioni aggressive a moduli tardivi non candidati e dichiara il fingerprinting stripped fuori scope.
 
@@ -949,3 +949,69 @@ SQLiteWatch performance checks failed.
 ```
 
 senza che il progetto analizzato contenga una singola riga di codice specifica per SQLiteWatch.
+
+# 29. Contratti di affidabilità
+
+## 29.1 Cattura SQL
+
+Il protocollo interno v2 identifica ogni modulo con path e base address. Un
+evento prepare riporta sempre SQL, byte UTF-8 catturati, truncation e
+`sql_capture_failed` coerenti. `pzTail` valido indica la fine completa dello
+statement; la truncation esiste soltanto quando il testo logico supera il limite
+di cattura. Il limite predefinito è 65.536 byte e quello massimo 1.048.576 byte.
+La lettura è bulk, bounded e non emette codepoint UTF-8 parziali. Doctor non
+cattura il testo SQL.
+
+## 29.2 Valutazione inconclusiva
+
+Il report JSON schema 2 contiene `evaluation.complete` e
+`incomplete_reasons`. Sono inconclusive le esecuzioni con:
+
+- metriche tutte nulle;
+- SQL troncata;
+- cattura SQL fallita;
+- lifecycle non associabile;
+- payload conflittuale;
+- esecuzione iniziata ma non conclusa prima dell'uscita del target;
+- errore agent marcato esplicitamente `data_loss` perché segnala perdita di osservazioni.
+
+Con almeno una regola configurata, una valutazione inconclusiva restituisce
+`70` e `rules.passed` è `false`; eventuali violazioni già rilevate restano nel
+report. Senza regole è un warning e non modifica da sola l'exit code. Duplicati
+identici deduplicabili non rendono la valutazione inconclusiva.
+
+## 29.3 Copertura e lifecycle
+
+Capability e prepare sono correlati tramite `(module_path, module_base)`. Attività
+su un modulo incompleto produce stato `PARTIAL`, anche se un altro modulo completo
+è caricato. Doctor restituisce `ACTIVE` soltanto se tutta l'attività osservata
+appartiene a moduli completi e riporta separatamente attività completa e
+incompleta.
+
+Prima del primo `sqlite3_step` di ogni esecuzione, l'agent invia un evento
+`statement_started` e attende l'ack del controller dopo validazione e messa in
+coda atomica; anche il batch terminale è acknowledged. Un `exit_group` immediato
+non può quindi cancellare silenziosamente il lavoro osservato: resta una
+`UNFINISHED_EXECUTIONS` inconclusiva. Un watchdog host bounded trasforma la
+mancata conferma dell'ack in transport failure fatale, evitando attese illimitate.
+
+Il completion socket accetta record soltanto dal PID launcher atteso e dallo
+stesso UID, verificati con `SO_PEERCRED`. Timeout, errori e interrupt applicano
+shutdown bounded con escalation fino a SIGKILL e non devono lasciare launcher o
+target vivi. Il backend può essere riutilizzato: ogni run resetta sequence e
+generazione, mentre callback tardivi vengono ignorati. Un modulo ricaricato dopo
+`dlclose()` viene agganciato nuovamente.
+
+## 29.4 Memoria e output
+
+Il percorso CLI normale analizza gli eventi in streaming e non conserva i raw
+lifecycle. La memoria cresce con statement attivi e query uniche; la retention
+materializzata mantiene un limite di sicurezza predefinito di 1.000.000 eventi.
+La cache della normalizzazione raw è una LRU bounded, quindi varianti di
+formattazione che convergono sullo stesso fingerprint non crescono senza limite.
+
+Stdout e file report sono UTF-8 anche con encoding ambientale ASCII. Il terminale
+e stderr escapano controlli C0/C1, ESC, DEL, newline e caratteri Unicode di
+formattazione/bidirezionali provenienti dal target. Il JSON conserva le stringhe
+strutturate originali. Poiché i report includono SQL e literal, devono essere
+trattati come artefatti potenzialmente sensibili.

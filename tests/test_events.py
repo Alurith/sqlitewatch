@@ -1,7 +1,10 @@
 import pytest
 
 from sqlitewatch.analysis import QueryAggregate, QueryScope, RuleConfig, RuleEvaluation, RuleViolation
-from sqlitewatch.events import RunResult, StatementExecuted, StatementFinalized, StatementPrepared
+from sqlitewatch.events import (
+    RunResult, StatementExecuted, StatementFinalized, StatementPrepared,
+    StatementStarted,
+)
 from sqlitewatch.outcome import resolve_outcome
 from sqlitewatch.instrumentation.protocol import ProtocolError, event_to_payload, payload_to_event
 
@@ -32,8 +35,17 @@ def test_execution_metrics_round_trip(metrics):
         database="0x987654", execution_number=2, sqlite_rc=101, boundary="done", **metrics,
     )
     payload = event_to_payload(event)
-    assert payload["protocol_version"] == 1
+    assert payload["protocol_version"] == 2
     assert payload_to_event(payload) == event
+
+
+def test_started_round_trip_and_run_result_collection():
+    event = StatementStarted(
+        123, 456, "libsqlite3.so.0", "0x123456", "0x987654", 2,
+        "/usr/lib/libsqlite3.so.0", "0x1000",
+    )
+    assert payload_to_event(event_to_payload(event)) == event
+    assert RunResult(123, 0, None, (event,)).started_executions == (event,)
 
 
 def test_finalized_round_trip():
@@ -96,10 +108,12 @@ def test_outcome_treats_failed_status_as_fatal_even_without_rules():
 
 def test_invalid_payloads_are_rejected():
     base = {
-        "type": "statement_prepared", "protocol_version": 1, "pid": 1, "tid": 1,
-        "module": "x", "statement": "1234", "database": "0x2", "sql": "SELECT 1",
+        "type": "statement_prepared", "protocol_version": 2, "pid": 1, "tid": 1,
+        "module": "x", "module_path": "/tmp/x", "module_base": "0x10",
+        "statement": "1234", "database": "0x2", "sql": "SELECT 1",
+        "sql_truncated": False, "captured_bytes": 8, "sql_capture_failed": False,
     }
     with pytest.raises(ProtocolError, match="statement"):
         payload_to_event(base)
     with pytest.raises(ProtocolError):
-        payload_to_event({"type": "unknown", "protocol_version": 1})
+        payload_to_event({"type": "unknown", "protocol_version": 2})
