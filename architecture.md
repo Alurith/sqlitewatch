@@ -747,6 +747,14 @@ SQLiteWatch must preserve enough information to distinguish target failures from
 
 ---
 
+### 17.1 Policy CI e routing degli stream
+
+Il Rule Engine riceve esclusivamente `QueryAggregate` già costruiti e rimane indipendente da Frida, controller e formato di report. Le regole fullscan/VM confrontano il massimo per singola esecuzione con `>`; autoindex fallisce soltanto quando esplicitamente configurato. Il report envelope JSON versionato contiene target, instrumentation, rules e outcome, quindi può rappresentare simultaneamente failure applicativa e performance.
+
+Il resolver dell'outcome applica questa precedenza: errore di output `74` (gestito dalla CLI dopo rendering), instrumentation `70`, segnale `128 + signal`, exit non-zero del target, sole regole `1`, successo `0`. Con regole attive, qualsiasi stato diverso da `ACTIVE` è instrumentation failure; senza regole `NOT_DETECTED` e `DETECTED_UNSUPPORTED` restano informativi.
+
+Il routing stream è confinato a CLI, controller e launcher. Solo in JSON su stdout il launcher esegue `dup2(stderr, stdout)` per il target, senza pipe o buffering; con file output i descrittori target restano invariati. Il writer report usa un temporaneo nella directory destinazione, `fsync()` e `os.replace()` e non crea directory padre mancanti.
+
 # 18. Doctor Mode Architecture
 
 Doctor mode validates instrumentation compatibility.

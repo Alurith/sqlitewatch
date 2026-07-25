@@ -96,6 +96,17 @@ def test_launcher_gating_precedes_target_resume_and_socket_status():
     assert lifecycle[1].vm_steps == 2
 
 
+def test_controller_passes_stdout_redirection_only_when_requested_to_launcher():
+    backend = FakeBackend()
+    ProcessController(backend).run(
+        ["target"],
+        ControllerConfig(target_stdout_to_stderr=True, backend_ready_timeout=0.1, launcher_ready_timeout=0.1),
+    )
+    launcher_argv = next(call[1] for call in backend.calls if isinstance(call, tuple) and call[0] == "spawn")
+    assert launcher_argv.index("--target-stdout-to-stderr") < launcher_argv.index("--")
+
+
+
 @pytest.mark.parametrize("completion", [
     {"pid": 5678, "exit_code": 7, "signal": None},
     {"pid": 5678, "exit_code": None, "signal": 15},

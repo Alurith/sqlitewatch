@@ -30,6 +30,7 @@ class ControllerConfig:
     backend_ready_timeout: float = 10.0
     launcher_ready_timeout: float = 10.0
     completion_timeout: float = 30.0
+    target_stdout_to_stderr: bool = False
 
 
 class ProcessController:
@@ -51,6 +52,8 @@ class ProcessController:
         config = config or ControllerConfig()
         if config.max_sql_length <= 0:
             raise ValueError("max_sql_length must be positive")
+        if not isinstance(config.target_stdout_to_stderr, bool):
+            raise ValueError("target_stdout_to_stderr must be a boolean")
         if min(config.backend_ready_timeout, config.launcher_ready_timeout, config.completion_timeout) <= 0:
             raise ValueError("controller timeouts must be positive")
 
@@ -75,6 +78,7 @@ class ProcessController:
                         "sqlitewatch.launcher",
                         "--socket",
                         socket_path,
+                        *( ["--target-stdout-to-stderr"] if config.target_stdout_to_stderr else [] ),
                         "--",
                         *argv,
                     ]

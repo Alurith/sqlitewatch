@@ -293,9 +293,9 @@ Aggiungere le opzioni:
 --output FILE
 ```
 
-Le soglie dovrebbero applicarsi al valore massimo per singola esecuzione, non soltanto ai totali aggregati.
+Le soglie si applicano al valore massimo per singola esecuzione, non ai totali aggregati, e falliscono soltanto con un confronto stretto `max > soglia`. Il valore `0` è valido; `--fail-on-autoindex` fallisce quando il totale autoindex è positivo.
 
-Il report dovrà distinguere:
+Il report distingue contemporaneamente:
 
 ```text
 Application failure
@@ -303,7 +303,18 @@ SQLiteWatch instrumentation failure
 SQLiteWatch performance rule failure
 ```
 
-La politica numerica degli exit code dovrà essere definita prima dell'implementazione finale.
+La policy numerica degli exit code è:
+
+| Condizione prioritaria | Exit code |
+|---|---:|
+| errore di emissione del report | `74` |
+| instrumentation failure | `70` |
+| target terminato da segnale | `128 + signal` |
+| target exit non-zero | codice target |
+| sole violazioni performance | `1` |
+| nessuna failure | `0` |
+
+Con regole abilitate, ogni stato di instrumentation diverso da `ACTIVE` (`FAILED`, `DETECTED_UNSUPPORTED`, `NOT_DETECTED`) fallisce con `70`; senza regole gli ultimi due stati restano informativi. In JSON stdout, stdout del target è rediretto su stderr per riservare stdout al solo documento JSON. Con `--output FILE`, il target conserva gli stream normali e il report UTF-8 viene scritto atomicamente con `os.replace()`; la directory padre non viene creata automaticamente.
 
 ---
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..analysis import AnalysisResult
+from .model import ReportData
 
 
 def render_terminal(analysis: AnalysisResult) -> str:
@@ -48,4 +49,44 @@ def render_terminal(analysis: AnalysisResult) -> str:
                 f"    Autoindex: {aggregate.total_autoindex}",
                 f"    Signals: {', '.join(aggregate.signals) if aggregate.signals else 'none'}",
             ])
+    return "\n".join(lines) + "\n"
+
+
+def render_run_terminal(report: ReportData) -> str:
+    """Render the complete run envelope without ANSI control sequences."""
+    analysis = report.analysis
+    rules = report.rules
+    outcome = report.outcome
+    lines = render_terminal(analysis).rstrip("\n").split("\n")
+    lines.extend([
+        "",
+        "Outcome",
+        f"  Application failure: {outcome.application_failed}",
+        f"  Instrumentation failure: {outcome.instrumentation_failed}",
+        f"  Performance rule failure: {outcome.performance_rule_failed}",
+        f"  Final exit code: {outcome.exit_code}",
+    ])
+
+    if rules.config.enabled:
+        lines.extend([
+            "",
+            "Configured rules",
+            f"  Fullscan steps: {rules.config.fail_fullscan_steps}",
+            f"  VM steps: {rules.config.fail_vm_steps}",
+            f"  Fail on autoindex: {rules.config.fail_on_autoindex}",
+        ])
+        lines.extend(["", "Rule violations"])
+        if rules.violations:
+            for index, violation in enumerate(rules.violations, start=1):
+                query = violation.query
+                lines.extend([
+                    f"  [{index}] {violation.rule}",
+                    f"    SQL: {query.normalized_sql}",
+                    f"    Scope: pid={query.scope.pid} module={query.scope.module} database={query.scope.database}",
+                    f"    Observed: {violation.observed}",
+                    f"    Threshold: {violation.threshold}",
+                ])
+        else:
+            lines.append("  none")
+
     return "\n".join(lines) + "\n"

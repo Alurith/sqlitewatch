@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
     sqlite3_stmt *stmt = NULL;
     int rc;
     int result = 0;
+    int fail_after_work = argc > 1 && strcmp(argv[1], "fail-after-work") == 0;
 
     if (argc > 1 && strcmp(argv[1], "fail") == 0) return 7;
     rc = sqlite3_open(":memory:", &db);
@@ -131,5 +132,5 @@ done:
     if (stmt != NULL) sqlite3_finalize(stmt);
     if (db != NULL) sqlite3_close(db);
     usleep(100000);
-    return result;
+    return fail_after_work && result == 0 ? 7 : result;
 }

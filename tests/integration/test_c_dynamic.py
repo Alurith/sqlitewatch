@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -99,3 +100,58 @@ def test_dynamic_fixture_is_instrumented(native_tools_available):
     assert record.linkage == "dynamic"
     assert record.prepared_v2 and record.prepared_v3
     assert record.metrics_active and record.metrics_observed
+
+
+@pytest.mark.integration
+def test_ci_rules_json_streams_and_target_failure_precedence(native_tools_available, tmp_path):
+    if subprocess.run(["pkg-config", "--exists", "sqlite3"], check=False).returncode != 0:
+        pytest.skip("SQLite development files are unavailable (pkg-config --exists sqlite3)")
+    subprocess.run(["make", "-C", str(FIXTURE_DIR)], check=True)
+    target = str(FIXTURE_DIR / "fixture")
+
+    def run_cli(*options, command=(target,)):
+        return subprocess.run(
+            [sys.executable, "-m", "sqlitewatch", *options, "--", *command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert run_cli("--fail-fullscan-steps", "1000000000").returncode == 0
+    fullscan = run_cli("--format=json", "--fail-fullscan-steps", "0")
+    vm = run_cli("--format=json", "--fail-vm-steps", "0")
+    autoindex = run_cli("--format=json", "--fail-on-autoindex")
+    assert (fullscan.returncode, vm.returncode, autoindex.returncode) == (1, 1, 1)
+    for completed, rule in (
+        (fullscan, "FULLSCAN_STEPS"),
+        (vm, "VM_STEPS"),
+        (autoindex, "AUTOINDEX"),
+    ):
+        payload = json.loads(completed.stdout)
+        assert any(item["rule"] == rule for item in payload["rules"]["violations"])
+        assert completed.stdout.endswith("\n")
+        assert "name=Ada\n" in completed.stderr
+
+    multiple = run_cli("--format=json", "--fail-fullscan-steps", "0", "--fail-vm-steps", "0", "--fail-on-autoindex")
+    multiple_payload = json.loads(multiple.stdout)
+    assert multiple.returncode == 1
+    assert {item["rule"] for item in multiple_payload["rules"]["violations"]} == {
+        "AUTOINDEX", "FULLSCAN_STEPS", "VM_STEPS",
+    }
+
+    simultaneous = run_cli("--format=json", "--fail-fullscan-steps", "0", command=(target, "fail-after-work"))
+    simultaneous_payload = json.loads(simultaneous.stdout)
+    assert simultaneous.returncode == 7
+    assert simultaneous_payload["outcome"]["application_failure"] is True
+    assert simultaneous_payload["outcome"]["performance_rule_failure"] is True
+
+    report_path = tmp_path / "report.json"
+    to_file = run_cli("--format=json", "--output", str(report_path), "--fail-fullscan-steps", "0")
+    file_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert to_file.returncode == 1
+    assert to_file.stdout == "name=Ada\n"
+    assert file_payload["schema_version"] == 1
+    assert file_payload["outcome"]["exit_code"] == 1
+
+    no_sqlite = run_cli("--fail-fullscan-steps", "0", command=("/bin/true",))
+    assert no_sqlite.returncode == 70

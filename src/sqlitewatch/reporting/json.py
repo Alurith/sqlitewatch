@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from ..analysis import AnalysisResult
+from .model import ReportData
 
 
 def analysis_to_dict(analysis: AnalysisResult) -> dict[str, object]:
@@ -56,3 +57,59 @@ def analysis_to_dict(analysis: AnalysisResult) -> dict[str, object]:
 
 def render_json(analysis: AnalysisResult) -> str:
     return json.dumps(analysis_to_dict(analysis), sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def run_report_to_dict(report: ReportData) -> dict[str, object]:
+    """Convert a full run report to the versioned CLI JSON envelope."""
+    derived = analysis_to_dict(report.analysis)
+    rules = report.rules
+    outcome = report.outcome
+    return {
+        "schema_version": 1,
+        "summary": derived["summary"],
+        "data_quality": derived["data_quality"],
+        "target": {
+            "exit_code": outcome.target_exit_code,
+            "signal": outcome.signal,
+            "failed": outcome.application_failed,
+        },
+        "instrumentation": {
+            "status": outcome.instrumentation_status,
+            "failed": outcome.instrumentation_failed,
+        },
+        "rules": {
+            "enabled": rules.config.enabled,
+            "passed": not rules.failed,
+            "configuration": {
+                "fail_fullscan_steps": rules.config.fail_fullscan_steps,
+                "fail_vm_steps": rules.config.fail_vm_steps,
+                "fail_on_autoindex": rules.config.fail_on_autoindex,
+            },
+            "violations": [
+                {
+                    "rule": violation.rule,
+                    "scope": {
+                        "pid": violation.query.scope.pid,
+                        "module": violation.query.scope.module,
+                        "database": violation.query.scope.database,
+                    },
+                    "fingerprint": violation.query.fingerprint,
+                    "sql": violation.query.normalized_sql,
+                    "observed": violation.observed,
+                    "threshold": violation.threshold,
+                }
+                for violation in rules.violations
+            ],
+        },
+        "outcome": {
+            "application_failure": outcome.application_failed,
+            "instrumentation_failure": outcome.instrumentation_failed,
+            "performance_rule_failure": outcome.performance_rule_failed,
+            "exit_code": outcome.exit_code,
+        },
+        "queries": derived["queries"],
+    }
+
+
+def render_run_json(report: ReportData) -> str:
+    return json.dumps(run_report_to_dict(report), sort_keys=True, ensure_ascii=False) + "\n"

@@ -12,16 +12,17 @@ import sys
 from typing import Sequence
 
 
-def _parse(argv: Sequence[str]) -> tuple[str, list[str]]:
+def _parse(argv: Sequence[str]) -> tuple[str, list[str], bool]:
     parser = argparse.ArgumentParser(prog="sqlitewatch.launcher", add_help=False)
     parser.add_argument("--socket", required=True)
+    parser.add_argument("--target-stdout-to-stderr", action="store_true")
     parsed, remainder = parser.parse_known_args(argv)
     if not remainder or remainder[0] != "--" or len(remainder) == 1:
         raise ValueError("expected -- followed by a target command")
     socket_path = Path(parsed.socket)
     if not socket_path.is_absolute() or len(os.fsencode(socket_path)) >= 108:
         raise ValueError("socket path must be an absolute AF_UNIX path shorter than 108 bytes")
-    return str(socket_path), list(remainder[1:])
+    return str(socket_path), list(remainder[1:]), parsed.target_stdout_to_stderr
 
 
 def _decode_status(pid: int, status: int) -> dict[str, int | None]:
@@ -43,14 +44,17 @@ def _send_status(socket_path: str, record: dict[str, int | None]) -> None:
 
 
 def run(argv: Sequence[str]) -> int:
-    socket_path, target = _parse(argv)
+    socket_path, target, target_stdout_to_stderr = _parse(argv)
     # posix_spawnp performs the fork/exec transition atomically from Frida's
     # perspective.  With a Python-level os.fork(), child gating observes the
     # launcher interpreter before exec and any script loaded into that session
     # is discarded by exec.  The launcher is still the target's direct parent
     # and exclusively owns its waitpid status.
     try:
-        child_pid = os.posix_spawnp(target[0], target, os.environ)
+        file_actions = (
+            [(os.POSIX_SPAWN_DUP2, 2, 1)] if target_stdout_to_stderr else None
+        )
+        child_pid = os.posix_spawnp(target[0], target, os.environ, file_actions=file_actions)
     except OSError:
         # Preserve the conventional exec failure status through the same IPC
         # contract even though posix_spawn reports the failure in the parent.

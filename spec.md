@@ -698,6 +698,14 @@ sqlitewatch --format json --output report.json -- pytest
 
 ---
 
+### 20.1 Contratto CI implementato
+
+Il JSON CLI è un envelope versionato (`schema_version: 1`) con `summary`, `data_quality`, `target`, `instrumentation`, `rules`, `outcome` e `queries`. `target` conserva `exit_code`, `signal` e `failed`; `instrumentation` riporta stato e failure effettiva; `rules` contiene configurazione, violazioni ordinate e `passed`; `outcome` riporta separatamente application, instrumentation e performance-rule failure oltre all'exit code finale.
+
+Le soglie fullscan e VM confrontano soltanto il massimo per singola esecuzione con confronto stretto `>`; non usano i totali. Le failure del target e delle regole possono coesistere nel report: il codice target prevale sulla sola failure performance. La precedenza completa è `74` per errori di emissione del report, `70` per instrumentation failure, `128 + signal`, exit code target non-zero, `1` per sole violazioni regole e `0` altrimenti.
+
+Quando almeno una regola è configurata, `NOT_DETECTED` e `DETECTED_UNSUPPORTED`, come `FAILED`, sono instrumentation failure e restituiscono `70`. In `--format json` senza `--output`, stdout del target viene consegnato a stderr così stdout rimane un singolo JSON parseabile. Con `--output FILE`, il report viene scritto atomicamente in UTF-8 nella directory già esistente; stdout del target non viene rediretto.
+
 # 21. Baseline
 
 La baseline è una funzionalità altamente desiderabile per l'MVP, ma può essere considerata opzionale nella prima iterazione.
