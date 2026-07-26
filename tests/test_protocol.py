@@ -1,11 +1,17 @@
 import pytest
 
 from sqlitewatch.events import InstrumentationError, LauncherReady, ProcessExited
-from sqlitewatch.instrumentation.protocol import ProtocolError, event_to_payload, frida_message_to_event, payload_to_event
+from sqlitewatch.instrumentation.protocol import (
+    ProtocolError,
+    event_to_payload,
+    frida_message_to_event,
+    payload_to_event,
+)
 
 
+TARGET = {"protocol_version": 3, "process_instance": "p1-i1"}
 BASE_PREPARED = {
-    "type": "statement_prepared", "protocol_version": 2, "pid": 1, "tid": 1,
+    "type": "statement_prepared", **TARGET, "pid": 1, "tid": 1,
     "module": "x", "module_path": "/tmp/x", "module_base": "0x1000",
     "statement": "0x1", "database": "0x2", "sql": "SELECT 1",
     "sqlite_rc": 0, "sql_truncated": False, "captured_bytes": 8,
@@ -13,7 +19,7 @@ BASE_PREPARED = {
 }
 
 BASE_EXECUTION = {
-    "type": "statement_executed", "protocol_version": 2, "pid": 1, "tid": 1,
+    "type": "statement_executed", **TARGET, "pid": 1, "tid": 1,
     "module": "x", "module_path": "/tmp/x", "module_base": "0x1000",
     "statement": "0x1", "database": "0x2", "execution_number": 1,
     "sqlite_rc": 101, "boundary": "done",
@@ -22,21 +28,25 @@ BASE_EXECUTION = {
 
 
 def test_process_exit_code_and_signal_are_distinct():
-    exited = payload_to_event({"type": "process_exited", "protocol_version": 2, "pid": 9, "exit_code": 7})
+    exited = payload_to_event({
+        "type": "process_exited", **TARGET, "pid": 9, "exit_code": 7,
+    })
     assert isinstance(exited, ProcessExited)
     assert exited.exit_code == 7
     assert exited.signal is None
-    signaled = payload_to_event({"type": "process_exited", "protocol_version": 2, "pid": 9, "signal": 15})
+    signaled = payload_to_event({
+        "type": "process_exited", **TARGET, "pid": 9, "signal": 15,
+    })
     assert signaled.signal == 15
 
 
 def test_launcher_ready_round_trip():
-    event = payload_to_event({"type": "launcher_ready", "protocol_version": 2, "pid": 9})
+    event = payload_to_event({"type": "launcher_ready", "protocol_version": 3, "pid": 9})
     assert isinstance(event, LauncherReady)
     assert payload_to_event(event_to_payload(event)) == event
 
 
-def test_instrumentation_data_loss_marker_round_trips():
+def test_instrumentation_data_loss_marker_round_trips_for_legacy_callers():
     event = InstrumentationError(
         "data_quality", "lost execution", fatal=False, data_loss=True
     )
@@ -50,19 +60,35 @@ def test_frida_error_is_not_no_activity():
     assert "load failed" in event.message
 
 
-def test_protocol_version_and_ids_are_validated():
+def test_protocol_version_ids_and_stream_attribution_are_validated():
     with pytest.raises(ProtocolError):
-        payload_to_event({"type": "backend_ready", "protocol_version": 1, "pid": 1})
+        payload_to_event({
+            "type": "backend_ready", "protocol_version": 2,
+            "process_instance": "p1-i1", "pid": 1,
+        })
     with pytest.raises(ProtocolError):
-        payload_to_event({"type": "backend_ready", "protocol_version": 2, "pid": 0})
+        payload_to_event({
+            "type": "backend_ready", **TARGET, "pid": 0,
+        })
+    with pytest.raises(ProtocolError, match="callback stream pid"):
+        payload_to_event(BASE_PREPARED, expected_pid=2, expected_process_instance="p1-i1")
+    with pytest.raises(ProtocolError, match="callback stream"):
+        payload_to_event(BASE_PREPARED, expected_pid=1, expected_process_instance="p1-i2")
+
+
+def test_target_payload_requires_process_instance():
+    payload = dict(BASE_PREPARED)
+    del payload["process_instance"]
+    with pytest.raises(ProtocolError, match="process_instance"):
+        payload_to_event(payload)
 
 
 @pytest.mark.parametrize("payload, message", [
-    ({"type": "statement_executed", "protocol_version": 2}, "missing required fields"),
+    ({"type": "statement_executed", **TARGET}, "missing required fields"),
     ({**BASE_EXECUTION, "execution_number": 0}, "execution_number"),
     ({**BASE_EXECUTION, "boundary": "unknown"}, "boundary"),
     ({
-        "type": "statement_finalized", "protocol_version": 2, "pid": 1, "tid": 1,
+        "type": "statement_finalized", **TARGET, "pid": 1, "tid": 1,
         "module": "x", "module_path": "/tmp/x", "module_base": "0x1000",
         "statement": "1", "database": "0x2", "executions": 0,
         "sqlite_rc": 0,
@@ -118,7 +144,7 @@ def test_all_null_metrics_are_valid_but_remain_explicit():
 
 def test_lifecycle_rejects_unknown_fields():
     payload = {
-        "type": "statement_finalized", "protocol_version": 2, "pid": 1, "tid": 1,
+        "type": "statement_finalized", **TARGET, "pid": 1, "tid": 1,
         "module": "x", "module_path": "/tmp/x", "module_base": "0x1000",
         "statement": "0x1", "database": "0x2", "executions": 0,
         "sqlite_rc": 0, "unexpected": True,

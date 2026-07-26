@@ -18,6 +18,7 @@ _RECENT_EXECUTION_WINDOW = 64
 
 @dataclass(frozen=True, slots=True)
 class TrackedExecution:
+    process_instance: str
     pid: int
     module: str
     module_path: str
@@ -51,6 +52,7 @@ class TrackingOutcome:
 
 @dataclass(frozen=True, slots=True)
 class _ExecutionIdentity:
+    process_instance: str
     pid: int
     statement: str
     lifetime: int
@@ -79,7 +81,7 @@ class _Lifetime:
 
 
 class StatementTracker:
-    """Incrementally track one active lifetime per ``(pid, sqlite3_stmt*)``.
+    """Track one lifetime per ``(process image, pid, sqlite3_stmt*)``.
 
     ``consume``/``finish`` are the bounded path used by the CLI reducer.  The
     convenience ``track`` method retains completed executions for callers that
@@ -91,7 +93,7 @@ class StatementTracker:
         self._reset()
 
     def _reset(self) -> None:
-        self._active: dict[tuple[int, str], _Lifetime] = {}
+        self._active: dict[tuple[str, int, str], _Lifetime] = {}
         self._next_occurrence = 0
         self._completed: list[TrackedExecution] = []
         self._observed = 0
@@ -146,7 +148,7 @@ class StatementTracker:
         )
 
     def _consume_prepared(self, event: StatementPrepared) -> None:
-        key = (event.pid, event.statement)
+        key = (event.process_instance, event.pid, event.statement)
         previous = self._active.pop(key, None)
         if previous is not None:
             # Already completed observations remain valid when SQLite reuses a
@@ -165,14 +167,16 @@ class StatementTracker:
         )
 
     def _consume_finalized(self, event: StatementFinalized) -> None:
-        key = (event.pid, event.statement)
+        key = (event.process_instance, event.pid, event.statement)
         lifetime = self._active.get(key)
         if lifetime is not None and _same_lifetime(lifetime, event):
             self._flush_lifetime(lifetime)
             del self._active[key]
 
     def _consume_started(self, event: StatementStarted) -> None:
-        lifetime = self._active.get((event.pid, event.statement))
+        lifetime = self._active.get(
+            (event.process_instance, event.pid, event.statement)
+        )
         if lifetime is None or not _same_lifetime(lifetime, event):
             self._unmatched += 1
             return
@@ -199,14 +203,20 @@ class StatementTracker:
         else:
             self._metric_bearing += 1
 
-        lifetime = self._active.get((event.pid, event.statement))
+        lifetime = self._active.get(
+            (event.process_instance, event.pid, event.statement)
+        )
         if lifetime is None or not _same_lifetime(lifetime, event):
             self._unmatched += 1
             return
 
         lifetime.started.pop(event.execution_number, None)
         identity = _ExecutionIdentity(
-            event.pid, event.statement, lifetime.occurrence, event.execution_number
+            event.process_instance,
+            event.pid,
+            event.statement,
+            lifetime.occurrence,
+            event.execution_number,
         )
         previous = lifetime.pending.get(identity)
         if previous is not None:
@@ -230,6 +240,7 @@ class StatementTracker:
             self._truncated += 1
         elif metrics is not None:
             candidate = TrackedExecution(
+                process_instance=event.process_instance,
                 pid=event.pid,
                 module=event.module,
                 module_path=event.module_path,

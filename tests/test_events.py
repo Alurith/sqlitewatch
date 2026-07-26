@@ -2,7 +2,7 @@ import pytest
 
 from sqlitewatch.analysis import QueryAggregate, QueryScope, RuleConfig, RuleEvaluation, RuleViolation
 from sqlitewatch.events import (
-    RunResult, StatementExecuted, StatementFinalized, StatementPrepared,
+    ModuleCapability, RunResult, StatementExecuted, StatementFinalized, StatementPrepared,
     StatementStarted,
 )
 from sqlitewatch.outcome import resolve_outcome
@@ -20,6 +20,17 @@ def test_statement_round_trip_unicode_and_pointer_strings():
     assert payload_to_event(event_to_payload(event)) == event
 
 
+def test_tuple_valued_module_capability_round_trip():
+    event = ModuleCapability(
+        1, "sqlite", "/tmp/sqlite", "dynamic", True, True,
+        ("sqlite3_prepare_v2",), ("sqlite3_step",), True,
+        ("sqlite3_prepare_v2",), ("sqlite3_prepare_v2",), (), ("reason",),
+    )
+    payload = event_to_payload(event)
+    assert isinstance(payload["symbols_present"], list)
+    assert payload_to_event(payload) == event
+
+
 def test_truncated_sql_metadata_round_trip():
     event = StatementPrepared(
         pid=1, tid=1, module="x", statement="0x1", database="0x2", sql="SELECT",
@@ -35,7 +46,7 @@ def test_execution_metrics_round_trip(metrics):
         database="0x987654", execution_number=2, sqlite_rc=101, boundary="done", **metrics,
     )
     payload = event_to_payload(event)
-    assert payload["protocol_version"] == 2
+    assert payload["protocol_version"] == 3
     assert payload_to_event(payload) == event
 
 
@@ -108,7 +119,8 @@ def test_outcome_treats_failed_status_as_fatal_even_without_rules():
 
 def test_invalid_payloads_are_rejected():
     base = {
-        "type": "statement_prepared", "protocol_version": 2, "pid": 1, "tid": 1,
+        "type": "statement_prepared", "protocol_version": 3,
+        "process_instance": "legacy", "pid": 1, "tid": 1,
         "module": "x", "module_path": "/tmp/x", "module_base": "0x10",
         "statement": "1234", "database": "0x2", "sql": "SELECT 1",
         "sql_truncated": False, "captured_bytes": 8, "sql_capture_failed": False,
@@ -116,4 +128,4 @@ def test_invalid_payloads_are_rejected():
     with pytest.raises(ProtocolError, match="statement"):
         payload_to_event(base)
     with pytest.raises(ProtocolError):
-        payload_to_event({"type": "unknown", "protocol_version": 2})
+        payload_to_event({"type": "unknown", "protocol_version": 3})

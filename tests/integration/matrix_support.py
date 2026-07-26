@@ -63,10 +63,12 @@ def _reason_from_result(result: RunResult) -> str | None:
 
 def _symbols_by_module(
     detections: Sequence[SqliteDetected],
-) -> dict[tuple[str, str], set[str]]:
-    found: dict[tuple[str, str], set[str]] = {}
+) -> dict[tuple[str, int, str, str], set[str]]:
+    found: dict[tuple[str, int, str, str], set[str]] = {}
     for event in detections:
-        found.setdefault((event.path, event.base), set()).add(event.symbol)
+        found.setdefault(
+            (event.process_instance, event.pid, event.path, event.base), set()
+        ).add(event.symbol)
     return found
 
 
@@ -88,7 +90,7 @@ def _metrics_active(detections: Sequence[SqliteDetected]) -> bool:
 
 def _complete_module_identities(
     detections: Sequence[SqliteDetected],
-) -> set[tuple[str, str]]:
+) -> set[tuple[str, int, str, str]]:
     return {
         identity
         for identity, symbols in _symbols_by_module(detections).items()
@@ -141,9 +143,22 @@ def build_matrix_record(
     metrics_observed = bool(executions) and all(_complete_metrics(event) for event in executions)
     complete_identities = _complete_module_identities(detections)
     activity_supported = bool(statements) and all(
-        (event.module_path, event.module_base) in complete_identities
-        or (event.module_path == "" and event.module_base == "0x0"
-            and any(detection.module == event.module for detection in detections))
+        (
+            event.process_instance,
+            event.pid,
+            event.module_path,
+            event.module_base,
+        ) in complete_identities
+        or (
+            event.module_path == ""
+            and event.module_base == "0x0"
+            and any(
+                detection.process_instance == event.process_instance
+                and detection.pid == event.pid
+                and detection.module == event.module
+                for detection in detections
+            )
+        )
         for event in statements
     )
     unsupported = (
@@ -190,8 +205,18 @@ def build_matrix_record(
             missing.append("functional output")
         reason = reason or "missing " + ", ".join(missing)
 
-    statement_modules = {event.module for event in statements}
-    first_detection = next((event for event in detections if event.module in statement_modules), detections[0] if detections else None)
+    statement_modules = {
+        (event.process_instance, event.pid, event.module) for event in statements
+    }
+    first_detection = next(
+        (
+            event
+            for event in detections
+            if (event.process_instance, event.pid, event.module)
+            in statement_modules
+        ),
+        detections[0] if detections else None,
+    )
     return MatrixRecord(
         scenario=scenario, status=status, command=command_tuple,
         target_exit_code=result.target_exit_code, sqlite_detected=bool(detections),

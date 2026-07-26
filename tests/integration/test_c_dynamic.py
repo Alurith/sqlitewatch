@@ -277,7 +277,7 @@ def test_ci_rules_json_streams_and_target_failure_precedence(native_tools_availa
     file_payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert to_file.returncode == 1
     assert to_file.stdout == "name=Ada\n"
-    assert file_payload["schema_version"] == 2
+    assert file_payload["schema_version"] == 3
     assert file_payload["outcome"]["exit_code"] == 1
 
     no_sqlite = run_cli("--fail-fullscan-steps", "0", command=("/bin/true",))

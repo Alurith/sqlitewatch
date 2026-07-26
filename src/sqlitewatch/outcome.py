@@ -18,6 +18,7 @@ class RunOutcome:
     performance_rule_failed: bool
     evaluation_incomplete: bool
     exit_code: int
+    pid: int | None = None
 
 
 def resolve_outcome(run: RunResult, rules: RuleEvaluation) -> RunOutcome:
@@ -54,4 +55,5 @@ def resolve_outcome(run: RunResult, rules: RuleEvaluation) -> RunOutcome:
         performance_rule_failed=performance_rule_failed,
         evaluation_incomplete=evaluation_incomplete,
         exit_code=exit_code,
+        pid=run.pid,
     )

@@ -4,6 +4,9 @@ from sqlitewatch.analysis import RuleConfig, analyze_run, evaluate_rules
 from sqlitewatch.doctor import reduce_events, resolve_doctor_outcome
 from sqlitewatch.events import (
     ModuleCapability,
+    ObservedProcess,
+    ProcessImage,
+    ProcessTreeResult,
     RunResult,
     StatementExecuted,
     StatementPrepared,
@@ -22,13 +25,22 @@ def test_run_terminal_escapes_controls_newlines_and_bidi_text():
         StatementPrepared(
             1, 1, f"sqlite-{DANGER}", "0x1", f"0x2", sql,
             module_path=f"/tmp/{DANGER}", module_base="0x1000",
+            process_instance=f"instance-{DANGER}",
         ),
         StatementExecuted(
             1, 1, f"sqlite-{DANGER}", "0x1", "0x2", 1, 101, "done",
-            0, 1, 0, 0, module_path=f"/tmp/{DANGER}", module_base="0x1000",
+            1, 1, 0, 0, module_path=f"/tmp/{DANGER}", module_base="0x1000",
+            process_instance=f"instance-{DANGER}",
         ),
     )
-    run = RunResult(1, 0, None, events, "ACTIVE")
+    image = ProcessImage(
+        f"instance-{DANGER}", 1, f"exec-{DANGER}", f"/tmp/{DANGER}",
+        "ACTIVE", True, True,
+    )
+    tree = ProcessTreeResult(
+        True, 1, True, (ObservedProcess(1, None, 0, True, (image,)),), 256, 1024,
+    )
+    run = RunResult(1, 0, None, events, "ACTIVE", process_tree=tree)
     analysis = analyze_run(run)
     rules = evaluate_rules(analysis, RuleConfig())
     text = render_run_terminal(ReportData(analysis, rules, resolve_outcome(run, rules)))

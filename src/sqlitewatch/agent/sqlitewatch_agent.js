@@ -1,16 +1,18 @@
 "use strict";
 
 // This file runs in Frida's JavaScript runtime, not Node.js.
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 const SQLITE_OK = 0, SQLITE_BUSY = 5, SQLITE_LOCKED = 6, SQLITE_ROW = 100, SQLITE_DONE = 101;
 const SQLITE_STMTSTATUS_FULLSCAN_STEP = 1, SQLITE_STMTSTATUS_SORT = 2;
 const SQLITE_STMTSTATUS_AUTOINDEX = 3, SQLITE_STMTSTATUS_VM_STEP = 4;
 const SQLITE_STMTSTATUS_RESET_FLAG = 0; // passive observer: never reset target counters
-const defaultConfig = { max_sql_length: 65536, doctor: false };
+const defaultConfig = { max_sql_length: 65536, doctor: false, process_instance: "legacy" };
 const config = (typeof SQLITEWATCH_CONFIG === "object" && SQLITEWATCH_CONFIG) || defaultConfig;
 const maxSqlLength = Number.isSafeInteger(Number(config.max_sql_length)) && Number(config.max_sql_length) > 0
   ? Math.min(Number(config.max_sql_length), 1048576) : defaultConfig.max_sql_length;
 const doctor = config.doctor === true;
+const processInstance = typeof config.process_instance === "string" && config.process_instance.length > 0
+  ? config.process_instance : defaultConfig.process_instance;
 
 const SYMBOLS = ["sqlite3_prepare_v2", "sqlite3_prepare_v3", "sqlite3_step", "sqlite3_reset", "sqlite3_finalize", "sqlite3_stmt_status", "sqlite3_libversion"];
 const PREPARE = ["sqlite3_prepare_v2", "sqlite3_prepare_v3"];
@@ -21,6 +23,9 @@ const hookedSymbolNames = new Set();
 const inspectedModules = new Set();
 const moduleRecords = new Map();
 const statementContexts = new Map();
+const unknownStatementDiagnostics = new Set();
+const MAX_UNKNOWN_STATEMENT_DIAGNOSTICS = 4096;
+let unknownStatementOverflowReported = false;
 const lifecycleQueue = [];
 const MAX_LIFECYCLE_QUEUE = 4096;
 let lifecycleSequence = 0;
@@ -32,7 +37,7 @@ let partialCoverageReason = null;
 let observer;
 
 function emitNow(type, fields) {
-  const payload = Object.assign({ type: type, protocol_version: PROTOCOL_VERSION }, fields || {});
+  const payload = Object.assign({ type: type, protocol_version: PROTOCOL_VERSION, process_instance: processInstance }, fields || {});
   try { send(payload); }
   catch (_) { transportFailed = true; }
 }
@@ -51,7 +56,7 @@ function queueLifecycle(type, fields, deferFlush) {
     fail("transport", "lifecycle queue overflow", true, true);
     return;
   }
-  lifecycleQueue.push(Object.assign({ type: type, protocol_version: PROTOCOL_VERSION }, fields));
+  lifecycleQueue.push(Object.assign({ type: type, protocol_version: PROTOCOL_VERSION, process_instance: processInstance }, fields));
   if (lifecycleQueue.length >= 64 && deferFlush !== true) flushLifecycle();
 }
 
@@ -63,11 +68,13 @@ function flushLifecycle(waitForAck) {
   let acknowledgement = null, acknowledged = false;
   if (ackRequired) {
     acknowledgement = recv("sqlitewatch_ack", function (message) {
-      acknowledged = message && message.payload && message.payload.sequence === sequence;
+      acknowledged = message && message.payload
+        && message.payload.process_instance === processInstance
+        && message.payload.sequence === sequence;
     });
   }
   try {
-    send({ type: "lifecycle_batch", protocol_version: PROTOCOL_VERSION, sequence: sequence, ack_required: ackRequired, events: events });
+    send({ type: "lifecycle_batch", protocol_version: PROTOCOL_VERSION, process_instance: processInstance, sequence: sequence, ack_required: ackRequired, events: events });
     if (acknowledgement !== null) {
       acknowledgement.wait();
       if (!acknowledged) throw new Error("invalid lifecycle acknowledgement for sequence " + sequence);
@@ -282,7 +289,37 @@ function readSql(sqlPointer, nByte, tailPointer) {
 
 function contextKey(statement) { return Process.id + ":" + pointerString(statement); }
 function lookupContext(statement) { return statement === null || statement.isNull() ? null : statementContexts.get(contextKey(statement)) || null; }
-function removeContext(statement) { if (statement !== null && !statement.isNull()) statementContexts.delete(contextKey(statement)); }
+function reportUnknownStatement(statement, operation) {
+  if (statement === null || statement.isNull()) return;
+  const key = contextKey(statement);
+  if (unknownStatementDiagnostics.has(key)) return;
+  if (unknownStatementDiagnostics.size >= MAX_UNKNOWN_STATEMENT_DIAGNOSTICS) {
+    if (!unknownStatementOverflowReported) {
+      unknownStatementOverflowReported = true;
+      fail("fork_inherited_statement", "unknown inherited statement diagnostic limit exceeded", false, true);
+    }
+    return;
+  }
+  unknownStatementDiagnostics.add(key);
+  fail(
+    "fork_inherited_statement",
+    operation + " observed unknown sqlite3_stmt* " + pointerString(statement)
+      + "; it may have been prepared before fork",
+    false,
+    true
+  );
+}
+function lookupContextForOperation(statement, operation) {
+  const context = lookupContext(statement);
+  if (context === null) reportUnknownStatement(statement, operation);
+  return context;
+}
+function removeContext(statement) {
+  if (statement !== null && !statement.isNull()) {
+    statementContexts.delete(contextKey(statement));
+    unknownStatementDiagnostics.delete(contextKey(statement));
+  }
+}
 function dataQuality(context, reason) { fail("data_quality", reason + " for " + context.statement, false, true); }
 
 function snapshot(context, statement) {
@@ -339,7 +376,9 @@ function installPrepare(module, address, abi, metricReader, record) {
           metricReader: metricReader, lastMetrics: null, nextExecutionNumber: 0,
           activeExecutionNumber: null, lastStepRc: null, ownerTid: null, stepDepth: 0
         };
-        context.lastMetrics = snapshot(context, statement); statementContexts.set(contextKey(statement), context);
+        context.lastMetrics = snapshot(context, statement);
+        unknownStatementDiagnostics.delete(contextKey(statement));
+        statementContexts.set(contextKey(statement), context);
         markActivity(record);
         queueLifecycle("statement_prepared", {
           pid: Process.id, tid: this.tid, module: context.module, module_path: context.modulePath,
@@ -356,7 +395,7 @@ function installStep(module, address, record) {
   return installHook(module, "sqlite3_step", address, {
     onEnter(args) {
       this.statement = args[0]; this.tid = Process.getCurrentThreadId();
-      this.statementContext = lookupContext(this.statement);
+      this.statementContext = lookupContextForOperation(this.statement, "sqlite3_step");
       if (this.statementContext && this.statementContext.ownerTid !== null && this.statementContext.ownerTid !== this.tid) {
         dataQuality(this.statementContext, "concurrent statement ownership conflict");
         this.statementContext = null;
@@ -397,13 +436,13 @@ function installStep(module, address, record) {
 }
 function installReset(module, address, record) {
   return installHook(module, "sqlite3_reset", address, {
-    onEnter(args) { this.statement = args[0]; this.tid = Process.getCurrentThreadId(); this.statementContext = lookupContext(this.statement); this.metrics = null; if (this.statementContext && this.statementContext.activeExecutionNumber !== null) { if (this.statementContext.ownerTid !== null && this.statementContext.ownerTid !== this.tid) { dataQuality(this.statementContext, "concurrent reset conflict"); this.statementContext = null; } else this.metrics = executionMetrics(this.statementContext, this.statement); } },
+    onEnter(args) { this.statement = args[0]; this.tid = Process.getCurrentThreadId(); this.statementContext = lookupContextForOperation(this.statement, "sqlite3_reset"); this.metrics = null; if (this.statementContext && this.statementContext.activeExecutionNumber !== null) { if (this.statementContext.ownerTid !== null && this.statementContext.ownerTid !== this.tid) { dataQuality(this.statementContext, "concurrent reset conflict"); this.statementContext = null; } else this.metrics = executionMetrics(this.statementContext, this.statement); } },
     onLeave(_) { if (this.statementContext) finishActiveExecution(this.statementContext, this.tid, "reset", this.metrics); }
   }, record);
 }
 function installFinalize(module, address, record) {
   return installHook(module, "sqlite3_finalize", address, {
-    onEnter(args) { this.statement = args[0]; this.tid = Process.getCurrentThreadId(); this.statementContext = lookupContext(this.statement); this.metrics = this.statementContext && this.statementContext.activeExecutionNumber !== null ? executionMetrics(this.statementContext, this.statement) : null; },
+    onEnter(args) { this.statement = args[0]; this.tid = Process.getCurrentThreadId(); this.statementContext = lookupContextForOperation(this.statement, "sqlite3_finalize"); this.metrics = this.statementContext && this.statementContext.activeExecutionNumber !== null ? executionMetrics(this.statementContext, this.statement) : null; },
     onLeave(retval) { try { if (!this.statementContext) return; finishActiveExecution(this.statementContext, this.tid, "finalize", this.metrics); queueLifecycle("statement_finalized", { pid: Process.id, tid: this.tid, module: this.statementContext.module, module_path: this.statementContext.modulePath, module_base: this.statementContext.moduleBase, statement: this.statementContext.statement, database: this.statementContext.database, executions: this.statementContext.nextExecutionNumber, sqlite_rc: retval.toInt32() }); } finally { removeContext(this.statement); flushLifecycle(); } }
   }, record);
 }

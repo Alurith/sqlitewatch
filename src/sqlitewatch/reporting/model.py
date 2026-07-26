@@ -27,3 +27,8 @@ class ReportData:
             raise ValueError("rule evaluation and outcome completeness must match")
         if self.analysis.incomplete_reasons != self.rules.incomplete_reasons:
             raise ValueError("analysis and rule evaluation reasons must match")
+        if (
+            self.analysis.process_tree is not None
+            and self.analysis.process_tree.root_pid != self.outcome.pid
+        ):
+            raise ValueError("process-tree root and target outcome pid must match")

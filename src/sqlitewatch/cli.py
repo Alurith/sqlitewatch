@@ -20,12 +20,15 @@ from .reporting import (
 from .reporting.output import write_report, write_utf8_stream
 from .reporting.sanitize import terminal_safe
 
-_DOCTOR_USAGE = "usage: sqlitewatch doctor [--format terminal|json] [--output FILE] -- <command> [args...]"
+_DOCTOR_USAGE = (
+    "usage: sqlitewatch doctor [--format terminal|json] [--output FILE] "
+    "[--no-follow-children] -- <command> [args...]"
+)
 
 _USAGE = (
     "usage: sqlitewatch [--max-sql-length N] [--fail-fullscan-steps N] "
     "[--fail-vm-steps N] [--fail-on-autoindex] [--format terminal|json] "
-    "[--output FILE] -- <command> [args...]"
+    "[--output FILE] [--no-follow-children] -- <command> [args...]"
 )
 
 
@@ -74,6 +77,7 @@ def _parse(argv: Sequence[str]) -> tuple[CliConfig, list[str]]:
     fail_on_autoindex = False
     report_format: Literal["terminal", "json"] = "terminal"
     output: Path | None = None
+    follow_children = True
     index = 0
     value_options = {
         "--max-sql-length",
@@ -87,6 +91,10 @@ def _parse(argv: Sequence[str]) -> tuple[CliConfig, list[str]]:
         option = options[index]
         if option == "--fail-on-autoindex":
             fail_on_autoindex = True
+            index += 1
+            continue
+        if option == "--no-follow-children":
+            follow_children = False
             index += 1
             continue
 
@@ -133,6 +141,7 @@ def _parse(argv: Sequence[str]) -> tuple[CliConfig, list[str]]:
     controller = ControllerConfig(
         max_sql_length=max_sql_length,
         target_stdout_to_stderr=report_format == "json" and output is None,
+        follow_children=follow_children,
     )
     return CliConfig(controller, rules, report_format, output), target
 
@@ -148,9 +157,14 @@ def _parse_doctor(argv: Sequence[str]) -> tuple[DoctorCliConfig, list[str]]:
         raise CliError("missing target command after '--'")
     report_format: Literal["terminal", "json"] = "terminal"
     output: Path | None = None
+    follow_children = True
     index = 0
     while index < len(options):
         option = options[index]
+        if option == "--no-follow-children":
+            follow_children = False
+            index += 1
+            continue
         if option.startswith("--format="):
             value = option.partition("=")[2]
             index += 1
@@ -173,21 +187,52 @@ def _parse_doctor(argv: Sequence[str]) -> tuple[DoctorCliConfig, list[str]]:
             if not value:
                 raise CliError("--output requires a non-empty path")
             output = Path(value)
-    return DoctorCliConfig(ControllerConfig(doctor=True, target_stdout_to_stderr=report_format == "json" and output is None), report_format, output), target
+    return DoctorCliConfig(
+        ControllerConfig(
+            doctor=True,
+            target_stdout_to_stderr=report_format == "json" and output is None,
+            follow_children=follow_children,
+        ),
+        report_format,
+        output,
+    ), target
 
 
 def _stderr_line(message: str) -> None:
     write_utf8_stream(sys.stderr, message + "\n")
 
 
-def _print_instrumentation_diagnostics(result: object) -> None:
+def _print_instrumentation_diagnostics(
+    result: object, *, doctor: bool = False
+) -> None:
     events = getattr(result, "events", ())
+    grouped: dict[tuple[str, bool], list[InstrumentationError]] = {}
     for event in events:
-        if isinstance(event, InstrumentationError):
+        if not isinstance(event, InstrumentationError):
+            continue
+        if doctor and not event.fatal and event.phase == "fork_inherited_statement":
+            continue
+        if event.fatal:
             _stderr_line(
                 "[instrumentation_error] "
                 f"{terminal_safe(event.phase)}: {terminal_safe(event.message)}"
             )
+            continue
+        grouped.setdefault((event.phase, event.data_loss), []).append(event)
+    for (phase, data_loss), diagnostics in grouped.items():
+        prefix = "data_quality_warning" if data_loss else "instrumentation_warning"
+        if phase == "fork_inherited_statement":
+            message = (
+                f"{len(diagnostics)} SQLite operation(s) used statements whose "
+                "prepare was not observed; evaluation is partial"
+            )
+        elif len(diagnostics) == 1:
+            message = diagnostics[0].message
+        else:
+            message = f"{len(diagnostics)} occurrences; {diagnostics[0].message}"
+        _stderr_line(
+            f"[{prefix}] {terminal_safe(phase)}: {terminal_safe(message)}"
+        )
     if getattr(result, "instrumentation_failed", False):
         message = getattr(result, "instrumentation_error", None) or "unknown error"
         _stderr_line(f"Instrumentation failed: {terminal_safe(message)}")
@@ -242,7 +287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 70
 
-    _print_instrumentation_diagnostics(result)
+    _print_instrumentation_diagnostics(result, doctor=doctor_mode)
     try:
         if config.output is None:
             write_utf8_stream(sys.stdout, content)

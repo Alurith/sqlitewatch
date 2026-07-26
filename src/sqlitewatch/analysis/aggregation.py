@@ -6,7 +6,14 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import sha256
 
-from ..events import Event, InstrumentationError, RunResult
+from ..events import (
+    LEGACY_PROCESS_INSTANCE,
+    Event,
+    InstrumentationError,
+    ProcessTreeResult,
+    RunResult,
+    effective_process_tree,
+)
 from .normalization import normalize_sql
 from .statement_tracker import StatementTracker, TrackedExecution, TrackingQuality
 
@@ -20,13 +27,20 @@ class QueryScope:
     database: str
     module_path: str = ""
     module_base: str = "0x0"
+    process_instance: str = LEGACY_PROCESS_INSTANCE
 
     def __post_init__(self) -> None:
         if isinstance(self.pid, bool) or not isinstance(self.pid, int) or self.pid <= 0:
             raise ValueError("scope pid must be a positive integer")
         if any(
             not isinstance(value, str)
-            for value in (self.module, self.database, self.module_path, self.module_base)
+            for value in (
+                self.module,
+                self.database,
+                self.module_path,
+                self.module_base,
+                self.process_instance,
+            )
         ):
             raise TypeError("scope module identity and database must be strings")
 
@@ -75,6 +89,7 @@ class DataQuality:
     sql_capture_failed_executions: int = 0
     unfinished_executions: int = 0
     instrumentation_data_loss_events: int = 0
+    process_coverage_loss_events: int = 0
 
     def __post_init__(self) -> None:
         _nonnegative_fields(self, (
@@ -82,6 +97,7 @@ class DataQuality:
             "unmatched_executions", "truncated_sql_executions", "duplicate_executions",
             "conflicted_executions", "sql_capture_failed_executions",
             "unfinished_executions", "instrumentation_data_loss_events",
+            "process_coverage_loss_events",
         ))
         if self.metric_bearing_executions + self.null_metric_executions != self.observed_executions:
             raise ValueError("observed executions must have either complete or null metrics")
@@ -98,6 +114,7 @@ class DataQuality:
                 ("SQL_CAPTURE_FAILED", self.sql_capture_failed_executions),
                 ("CONFLICTED_EXECUTIONS", self.conflicted_executions),
                 ("UNFINISHED_EXECUTIONS", self.unfinished_executions),
+                ("PROCESS_COVERAGE_LOSS", self.process_coverage_loss_events),
                 ("INSTRUMENTATION_DATA_LOSS", self.instrumentation_data_loss_events),
             )
             if count
@@ -113,6 +130,7 @@ class AnalysisResult:
     evaluation_complete: bool = True
     incomplete_reasons: tuple[str, ...] = ()
     sql_capture_limit: int | None = None
+    process_tree: ProcessTreeResult | None = None
 
     def __post_init__(self) -> None:
         expected = self.data_quality.incomplete_reasons
@@ -172,9 +190,12 @@ class AnalysisReducer:
     """Consume lifecycle events without retaining the complete raw stream."""
 
     def __init__(self) -> None:
-        self._builders: dict[tuple[int, str, str, str, str, str], _AggregateBuilder] = {}
+        self._builders: dict[
+            tuple[str, int, str, str, str, str, str], _AggregateBuilder
+        ] = {}
         self._normalized_cache: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._instrumentation_data_loss_events = 0
+        self._process_coverage_loss_events = 0
         self._tracker = StatementTracker(on_execution=self._consume_execution)
         self._finished = False
 
@@ -182,7 +203,10 @@ class AnalysisReducer:
         if self._finished:
             raise RuntimeError("cannot consume events after analysis finish")
         if isinstance(event, InstrumentationError) and event.data_loss:
-            self._instrumentation_data_loss_events += 1
+            if event.phase == "process_coverage":
+                self._process_coverage_loss_events += 1
+            else:
+                self._instrumentation_data_loss_events += 1
         self._tracker.consume(event)
 
     def finish(self, run: RunResult) -> AnalysisResult:
@@ -191,7 +215,9 @@ class AnalysisReducer:
         tracking = self._tracker.finish()
         self._finished = True
         quality = _data_quality(
-            tracking.quality, self._instrumentation_data_loss_events
+            tracking.quality,
+            self._instrumentation_data_loss_events,
+            self._process_coverage_loss_events,
         )
         reasons = quality.incomplete_reasons
         return AnalysisResult(
@@ -205,6 +231,7 @@ class AnalysisReducer:
             evaluation_complete=not reasons,
             incomplete_reasons=reasons,
             sql_capture_limit=run.sql_capture_limit,
+            process_tree=effective_process_tree(run),
         )
 
     def _consume_execution(self, execution: TrackedExecution) -> None:
@@ -221,10 +248,16 @@ class AnalysisReducer:
             execution.database,
             execution.module_path,
             execution.module_base,
+            execution.process_instance,
         )
         key = (
-            scope.pid, scope.module, scope.module_path, scope.module_base,
-            scope.database, fingerprint,
+            scope.process_instance,
+            scope.pid,
+            scope.module,
+            scope.module_path,
+            scope.module_base,
+            scope.database,
+            fingerprint,
         )
         builder = self._builders.get(key)
         if builder is None:
@@ -249,7 +282,9 @@ def analyze_run(run: RunResult) -> AnalysisResult:
 
 
 def _data_quality(
-    quality: TrackingQuality, instrumentation_data_loss_events: int = 0
+    quality: TrackingQuality,
+    instrumentation_data_loss_events: int = 0,
+    process_coverage_loss_events: int = 0,
 ) -> DataQuality:
     return DataQuality(
         observed_executions=quality.observed_executions,
@@ -262,6 +297,7 @@ def _data_quality(
         sql_capture_failed_executions=quality.sql_capture_failed_executions,
         unfinished_executions=quality.unfinished_executions,
         instrumentation_data_loss_events=instrumentation_data_loss_events,
+        process_coverage_loss_events=process_coverage_loss_events,
     )
 
 
@@ -270,7 +306,9 @@ def _normalized_fingerprint(sql: str) -> tuple[str, str]:
     return normalized, sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _ranking_key(aggregate: QueryAggregate) -> tuple[int, int, int, int, int, int, int, str]:
+def _ranking_key(
+    aggregate: QueryAggregate,
+) -> tuple[int, int, int, int, int, int, int, str, str, int, str, str, str, str]:
     return (
         -int(aggregate.total_autoindex > 0),
         -int(aggregate.max_fullscan_steps > 0),
@@ -280,6 +318,12 @@ def _ranking_key(aggregate: QueryAggregate) -> tuple[int, int, int, int, int, in
         -aggregate.total_fullscan_steps,
         -aggregate.total_sorts,
         aggregate.fingerprint,
+        aggregate.scope.process_instance,
+        aggregate.scope.pid,
+        aggregate.scope.module,
+        aggregate.scope.module_path,
+        aggregate.scope.module_base,
+        aggregate.scope.database,
     )
 
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
+LEGACY_PROCESS_INSTANCE = "legacy"
 InstrumentationState = str
 DoctorState = Literal[
     "FAILED", "NOT_DETECTED", "DETECTED_UNSUPPORTED", "NO_ACTIVITY", "PARTIAL", "ACTIVE"
@@ -18,6 +19,7 @@ class BackendReady:
     protocol_version: int = PROTOCOL_VERSION
     arch: str = "x64"
     platform: str = "linux"
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="backend_ready", init=False)
 
 
@@ -44,6 +46,7 @@ class SqliteDetected:
     linkage: str | None = None
     base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="sqlite_detected", init=False)
 
 
@@ -72,6 +75,7 @@ class ModuleCapability:
     sqlite_version: str | None = None
     base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="module_capability", init=False)
 
 
@@ -83,6 +87,7 @@ class InstrumentationStatus:
     reason: str | None = None
     sql_capture_limit: int | None = None
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="instrumentation_status", init=False)
 
 
@@ -101,6 +106,7 @@ class StatementPrepared:
     module_path: str = ""
     module_base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="statement_prepared", init=False)
 
     def __post_init__(self) -> None:
@@ -119,6 +125,7 @@ class StatementStarted:
     module_path: str = ""
     module_base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="statement_started", init=False)
 
 
@@ -139,6 +146,7 @@ class StatementExecuted:
     module_path: str = ""
     module_base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="statement_executed", init=False)
 
 
@@ -154,6 +162,7 @@ class StatementFinalized:
     module_path: str = ""
     module_base: str = "0x0"
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="statement_finalized", init=False)
 
 
@@ -166,6 +175,7 @@ class InstrumentationError:
     sqlite_rc: int | None = None
     data_loss: bool = False
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="instrumentation_error", init=False)
 
 
@@ -175,6 +185,7 @@ class ProcessExited:
     exit_code: int | None = None
     signal: int | None = None
     protocol_version: int = PROTOCOL_VERSION
+    process_instance: str = LEGACY_PROCESS_INSTANCE
     type: str = field(default="process_exited", init=False)
 
 
@@ -183,6 +194,100 @@ Event: TypeAlias = (
     InstrumentationStatus | StatementPrepared | StatementStarted |
     StatementExecuted | StatementFinalized | InstrumentationError | ProcessExited
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessImage:
+    instance: str
+    pid: int
+    origin: str
+    identifier: str | None
+    instrumentation_status: str
+    instrumented: bool
+    coverage_complete: bool
+    detach_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.instance:
+            raise ValueError("process image instance cannot be empty")
+        if isinstance(self.pid, bool) or not isinstance(self.pid, int) or self.pid <= 0:
+            raise ValueError("process image pid must be a positive integer")
+        if not self.origin:
+            raise ValueError("process image origin cannot be empty")
+        if self.instrumentation_status not in {
+            "FAILED", "PARTIAL", "ACTIVE", "DETECTED_UNSUPPORTED", "NOT_DETECTED",
+        }:
+            raise ValueError("invalid process image instrumentation status")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedProcess:
+    pid: int
+    parent_pid: int | None
+    depth: int
+    root: bool
+    images: tuple[ProcessImage, ...]
+    active_at_root_exit: bool = False
+
+    def __post_init__(self) -> None:
+        if isinstance(self.pid, bool) or not isinstance(self.pid, int) or self.pid <= 0:
+            raise ValueError("observed process pid must be a positive integer")
+        if self.parent_pid is not None and (
+            isinstance(self.parent_pid, bool)
+            or not isinstance(self.parent_pid, int)
+            or self.parent_pid <= 0
+        ):
+            raise ValueError("observed process parent pid must be positive or None")
+        if isinstance(self.depth, bool) or not isinstance(self.depth, int) or self.depth < 0:
+            raise ValueError("observed process depth must be a non-negative integer")
+        if not self.images:
+            raise ValueError("observed processes require at least one image")
+        if any(image.pid != self.pid for image in self.images):
+            raise ValueError("all process images must belong to the observed pid")
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessTreeResult:
+    follow_children: bool
+    root_pid: int | None
+    complete: bool
+    processes: tuple[ObservedProcess, ...]
+    max_followed_processes: int
+    max_process_images: int
+    omitted_images: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.follow_children, bool) or not isinstance(self.complete, bool):
+            raise TypeError("process tree policy flags must be booleans")
+        for name in ("max_followed_processes", "max_process_images"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if (
+            isinstance(self.omitted_images, bool)
+            or not isinstance(self.omitted_images, int)
+            or self.omitted_images < 0
+        ):
+            raise ValueError("omitted_images must be a non-negative integer")
+        if self.root_pid is None:
+            if self.processes:
+                raise ValueError("a process tree without a root pid must be empty")
+        elif not any(process.pid == self.root_pid and process.root for process in self.processes):
+            raise ValueError("process tree root pid must identify a root process")
+        if len({process.pid for process in self.processes}) != len(self.processes):
+            raise ValueError("process tree process pids must be unique")
+
+    @property
+    def process_count(self) -> int:
+        return len(self.processes)
+
+    @property
+    def image_count(self) -> int:
+        return sum(len(process.images) for process in self.processes)
+
+    @property
+    def active_at_root_exit(self) -> int:
+        return sum(process.active_at_root_exit for process in self.processes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +301,7 @@ class RunResult:
     instrumentation_error: str | None = None
     sql_capture_limit: int | None = None
     events_retained: bool = True
+    process_tree: ProcessTreeResult | None = None
 
     @property
     def exit_code(self) -> int:
@@ -231,3 +337,29 @@ class RunResult:
             "instrumentation_failed": self.instrumentation_failed,
             "events": [event_to_payload(event) for event in self.events],
         }
+
+
+def effective_process_tree(run: RunResult) -> ProcessTreeResult:
+    """Return the explicit tree or a deterministic legacy root-only summary."""
+    if run.process_tree is not None:
+        return run.process_tree
+    processes: tuple[ObservedProcess, ...] = ()
+    if run.pid is not None:
+        image = ProcessImage(
+            instance=LEGACY_PROCESS_INSTANCE,
+            pid=run.pid,
+            origin="legacy",
+            identifier=None,
+            instrumentation_status=run.instrumentation_status,
+            instrumented=not run.instrumentation_failed,
+            coverage_complete=not run.instrumentation_failed,
+        )
+        processes = (ObservedProcess(run.pid, None, 0, True, (image,)),)
+    return ProcessTreeResult(
+        follow_children=False,
+        root_pid=run.pid,
+        complete=not run.instrumentation_failed,
+        processes=processes,
+        max_followed_processes=1,
+        max_process_images=1,
+    )

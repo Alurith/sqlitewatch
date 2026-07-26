@@ -49,7 +49,9 @@ def run(argv: Sequence[str]) -> int:
     # perspective.  With a Python-level os.fork(), child gating observes the
     # launcher interpreter before exec and any script loaded into that session
     # is discarded by exec.  The launcher is still the target's direct parent
-    # and exclusively owns its waitpid status.
+    # and exclusively owns its waitpid status. Descendants are gated and
+    # instrumented by the controller; this launcher never waitpid()s them and
+    # never folds their exits into the authenticated root completion record.
     try:
         file_actions = (
             [(os.POSIX_SPAWN_DUP2, 2, 1)] if target_stdout_to_stderr else None

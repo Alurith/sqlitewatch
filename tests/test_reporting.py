@@ -16,8 +16,17 @@ from sqlitewatch.reporting import (
 )
 
 
-def _analysis(*, null=False):
-    metrics = dict(fullscan_steps=None, vm_steps=None, sorts=None, autoindex=None) if null else dict(fullscan_steps=2, vm_steps=9, sorts=1, autoindex=0)
+def _analysis(*, null=False, clean=False):
+    metrics = (
+        dict(fullscan_steps=None, vm_steps=None, sorts=None, autoindex=None)
+        if null
+        else dict(
+            fullscan_steps=0 if clean else 2,
+            vm_steps=9,
+            sorts=0 if clean else 1,
+            autoindex=0,
+        )
+    )
     events = (
         StatementPrepared(7, 1, "sqlite", "0x1", "0x2", "SELECT  café FROM t"),
         StatementExecuted(7, 1, "sqlite", "0x1", "0x2", 1, 101, "done", **metrics),
@@ -37,6 +46,16 @@ def test_terminal_report_contains_summary_scope_metrics_and_signals():
     assert "Signals: FULL_SCAN, SORT" in text
 
 
+def test_complete_run_terminal_hides_healthy_queries_by_default():
+    analysis = _analysis(clean=True)
+    run = RunResult(7, 0, None, instrumentation_status="ACTIVE")
+    rules = evaluate_rules(analysis, RuleConfig())
+    text = render_run_terminal(ReportData(analysis, rules, resolve_outcome(run, rules)))
+    assert "SQLiteWatch: WORKING" in text
+    assert "Potential query problems: 0" in text
+    assert "SELECT café FROM t" not in text
+
+
 def test_terminal_report_does_not_present_missing_metrics_as_zero():
     text = render_terminal(_analysis(null=True))
     assert "Null-metric executions: 1" in text
@@ -54,7 +73,9 @@ def _report(*, config=RuleConfig(), target_exit=0, status="ACTIVE", instrumentat
 def test_complete_reports_include_matching_outcome_and_rule_data():
     report = _report(config=RuleConfig(fail_fullscan_steps=1, fail_vm_steps=8))
     payload = run_report_to_dict(report)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
+    assert payload["target"]["pid"] == 7
+    assert payload["process_tree"]["root_pid"] == 7
     assert payload["rules"]["enabled"] is True
     assert payload["instrumentation"]["sql_capture_limit"] == 4096
     assert [item["rule"] for item in payload["rules"]["violations"]] == ["FULLSCAN_STEPS", "VM_STEPS"]
@@ -72,11 +93,13 @@ def test_complete_reports_include_matching_outcome_and_rule_data():
     assert render_run_json(report) == rendered
     assert "café" in rendered
     terminal = render_run_terminal(report)
-    assert "Application failure: False" in terminal
-    assert "Performance rule failure: True" in terminal
-    assert "[1] FULLSCAN_STEPS" in terminal
-    assert "Observed: 2" in terminal
-    assert "Threshold: 1" in terminal
+    assert "SQLiteWatch: WORKING" in terminal
+    assert "Application: EXITED NORMALLY (0)" in terminal
+    assert "Rules: FAILED (2 violations)" in terminal
+    assert "Potential query problems: 1" in terminal
+    assert "FULLSCAN_STEPS" in terminal and "VM_STEPS" in terminal
+    assert "fullscan(total/max)=2/2" in terminal
+    assert "Full details: rerun with --format json." in terminal
 
 
 def test_complete_report_preserves_simultaneous_application_and_instrumentation_failures():
@@ -107,9 +130,10 @@ def test_json_schema_is_stable_utf8_and_deterministic():
     }
     query = payload["queries"][0]
     assert query["scope"] == {
-        "pid": 7, "module": "sqlite", "module_path": "",
-        "module_base": "0x0", "database": "0x2",
+        "process_instance": "legacy", "pid": 7, "module": "sqlite",
+        "module_path": "", "module_base": "0x0", "database": "0x2",
     }
+    assert payload["process_tree"]["scope"] == "root_only"
     assert query["fullscan_steps"] == {"total": 2, "max": 2}
     assert query["signals"] == ["FULL_SCAN", "SORT"]
     rendered = render_json(analysis)

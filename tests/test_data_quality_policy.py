@@ -72,6 +72,16 @@ def _events(category):
                 fatal=False, data_loss=True,
             ),
         )
+    if category == "PROCESS_COVERAGE_LOSS":
+        return (
+            _prepared(),
+            _executed(),
+            InstrumentationError(
+                "process_coverage", "child attach failed",
+                pid=2, fatal=False, data_loss=True,
+                process_instance="p2-i1",
+            ),
+        )
     raise AssertionError(category)
 
 
@@ -85,6 +95,7 @@ def _events(category):
         "CONFLICTED_EXECUTIONS",
         "UNFINISHED_EXECUTIONS",
         "INSTRUMENTATION_DATA_LOSS",
+        "PROCESS_COVERAGE_LOSS",
     ],
 )
 def test_incomplete_data_is_warning_without_rules_and_failure_with_rules(category):
@@ -98,9 +109,11 @@ def test_incomplete_data_is_warning_without_rules_and_failure_with_rules(categor
     assert informational.inconclusive and not informational.passed
     assert not informational_outcome.instrumentation_failed
     assert informational_outcome.exit_code == 0
-    assert "Evaluation warning" in render_run_terminal(
+    terminal = render_run_terminal(
         ReportData(analysis, informational, informational_outcome)
     )
+    assert "SQLiteWatch: WORKING WITH WARNINGS" in terminal
+    assert "Warnings" in terminal
 
     enforced = evaluate_rules(analysis, RuleConfig(fail_vm_steps=0))
     enforced_outcome = resolve_outcome(run, enforced)

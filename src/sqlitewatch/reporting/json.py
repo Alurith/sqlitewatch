@@ -6,6 +6,7 @@ import json
 
 from ..analysis import AnalysisResult
 from .model import ReportData
+from .process_tree import process_tree_to_dict
 
 
 def analysis_to_dict(analysis: AnalysisResult) -> dict[str, object]:
@@ -26,6 +27,7 @@ def analysis_to_dict(analysis: AnalysisResult) -> dict[str, object]:
             "conflicted_executions": quality.conflicted_executions,
             "unfinished_executions": quality.unfinished_executions,
             "instrumentation_data_loss_events": quality.instrumentation_data_loss_events,
+            "process_coverage_loss_events": quality.process_coverage_loss_events,
         },
         "evaluation": {
             "complete": analysis.evaluation_complete,
@@ -36,9 +38,15 @@ def analysis_to_dict(analysis: AnalysisResult) -> dict[str, object]:
             "failed": analysis.instrumentation_failed,
             "sql_capture_limit": analysis.sql_capture_limit,
         },
+        "process_tree": (
+            process_tree_to_dict(analysis.process_tree)
+            if analysis.process_tree is not None
+            else None
+        ),
         "queries": [
             {
                 "scope": {
+                    "process_instance": aggregate.scope.process_instance,
                     "pid": aggregate.scope.pid,
                     "module": aggregate.scope.module,
                     "module_path": aggregate.scope.module_path,
@@ -75,11 +83,12 @@ def run_report_to_dict(report: ReportData) -> dict[str, object]:
     rules = report.rules
     outcome = report.outcome
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "summary": derived["summary"],
         "data_quality": derived["data_quality"],
         "evaluation": derived["evaluation"],
         "target": {
+            "pid": outcome.pid,
             "exit_code": outcome.target_exit_code,
             "signal": outcome.signal,
             "failed": outcome.application_failed,
@@ -89,6 +98,7 @@ def run_report_to_dict(report: ReportData) -> dict[str, object]:
             "failed": outcome.instrumentation_failed,
             "sql_capture_limit": report.analysis.sql_capture_limit,
         },
+        "process_tree": derived["process_tree"],
         "rules": {
             "enabled": rules.config.enabled,
             "passed": rules.passed,
@@ -103,6 +113,7 @@ def run_report_to_dict(report: ReportData) -> dict[str, object]:
                 {
                     "rule": violation.rule,
                     "scope": {
+                        "process_instance": violation.query.scope.process_instance,
                         "pid": violation.query.scope.pid,
                         "module": violation.query.scope.module,
                         "module_path": violation.query.scope.module_path,

@@ -20,8 +20,9 @@ def _result(*, exit_code=0, status="ACTIVE", instrumentation_failed=False):
 def test_parser_accepts_ci_options_before_delimiter_and_preserves_target_arguments():
     config, target = cli._parse([
         "--max-sql-length=16", "--fail-fullscan-steps", "0", "--fail-vm-steps=4",
-        "--fail-on-autoindex", "--format=json", "--output", "report.json", "--",
-        "target", "--format", "json",
+        "--fail-on-autoindex", "--format=json", "--output", "report.json",
+        "--no-follow-children", "--", "target", "--format", "json",
+        "--no-follow-children",
     ])
     assert config.controller.max_sql_length == 16
     assert config.rules.fail_fullscan_steps == 0
@@ -30,13 +31,15 @@ def test_parser_accepts_ci_options_before_delimiter_and_preserves_target_argumen
     assert config.format == "json"
     assert config.output == Path("report.json")
     assert config.controller.target_stdout_to_stderr is False
-    assert target == ["target", "--format", "json"]
+    assert config.controller.follow_children is False
+    assert target == ["target", "--format", "json", "--no-follow-children"]
 
 
 def test_parser_defaults_and_json_stdout_redirection():
     config, target = cli._parse(["--format", "json", "--", "target"])
     assert config.output is None
     assert config.controller.target_stdout_to_stderr is True
+    assert config.controller.follow_children is True
     assert target == ["target"]
 
 
@@ -66,11 +69,38 @@ def test_cli_renders_complete_json_and_preserves_nonfatal_diagnostics(monkeypatc
     assert cli.main(["--max-sql-length", "16", "--format", "json", "--", "target"]) == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
+    assert payload["process_tree"]["follow_children"] is False
     assert payload["outcome"]["exit_code"] == 0
     assert "Target exited" not in captured.out
     assert "SQLiteWatch analysis" not in captured.out
-    assert "[instrumentation_error] stmt_status: transient" in captured.err
+    assert "[instrumentation_warning] stmt_status: transient" in captured.err
+
+
+def test_nonfatal_data_loss_diagnostics_are_aggregated_for_humans(capsys):
+    result = RunResult(
+        1, 0, None,
+        (
+            InstrumentationError(
+                "fork_inherited_statement", "unknown statement 0x1",
+                fatal=False, data_loss=True,
+            ),
+            InstrumentationError(
+                "fork_inherited_statement", "unknown statement 0x2",
+                fatal=False, data_loss=True,
+            ),
+        ),
+        "ACTIVE",
+    )
+    cli._print_instrumentation_diagnostics(result)
+    error = capsys.readouterr().err
+    assert error.count("[data_quality_warning]") == 1
+    assert "2 SQLite operation(s)" in error
+    assert "evaluation is partial" in error
+    assert "0x1" not in error and "0x2" not in error
+
+    cli._print_instrumentation_diagnostics(result, doctor=True)
+    assert capsys.readouterr().err == ""
 
 
 def test_cli_writes_report_to_file_without_duplication_or_target_redirection(monkeypatch, capsys, tmp_path):

@@ -41,6 +41,10 @@ def test_agent_source_has_lifecycle_registry_and_modern_frida_api():
     assert "resetFlag=1" not in source
     assert 'installHook(module, "sqlite3_stmt_status"' not in source
     assert "embedded_or_unknown" in source
+    assert "process_instance" in source
+    assert "fork_inherited_statement" in source
+    assert "unknownStatementDiagnostics" in source
+    assert "PROTOCOL_VERSION = 3" in source
     assert "Module.findExportByName" not in source
     assert "Module.enumerateExports" not in source
 
