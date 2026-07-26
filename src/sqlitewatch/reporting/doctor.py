@@ -1,4 +1,4 @@
-"""Deterministic renderers for the Doctor-specific report schema."""
+"""Deterministic renderers for the compatibility-check report schema."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .sanitize import terminal_safe
 def doctor_to_dict(result: DoctorResult, outcome: DoctorOutcome) -> dict[str, object]:
     return {
         "schema_version": 3,
-        "report_type": "sqlitewatch_doctor",
+        "report_type": "sqlitewatch_check",
         "status": result.status,
         "target": {
             "pid": result.pid,
@@ -60,7 +60,7 @@ def doctor_to_dict(result: DoctorResult, outcome: DoctorOutcome) -> dict[str, ob
         "limitations": list(result.limitations),
         "outcome": {
             "application_failure": outcome.application_failed,
-            "doctor_failure": outcome.doctor_failed,
+            "check_failure": outcome.doctor_failed,
             "exit_code": outcome.exit_code,
         },
     }
@@ -132,7 +132,7 @@ def _relevant_module_groups(result: DoctorResult) -> list[dict[str, object]]:
 def render_doctor_terminal(result: DoctorResult, outcome: DoctorOutcome) -> str:
     """Render compatibility conclusions, hiding irrelevant native modules."""
     lines = [
-        f"SQLiteWatch Doctor: {_doctor_verdict(result)}",
+        f"SQLiteWatch Check: {_doctor_verdict(result)}",
         "",
         f"SQLite activity: {result.complete_activity_count} complete, "
         f"{result.incomplete_activity_count} incomplete",
@@ -188,7 +188,7 @@ def render_doctor_terminal(result: DoctorResult, outcome: DoctorOutcome) -> str:
     lines.extend([
         "",
         f"Exit code: {outcome.exit_code}",
-        "Doctor checks compatibility; use the normal command for query analysis.",
-        "Full details: rerun Doctor with --format json.",
+        "Check verifies compatibility; use the normal command for query analysis.",
+        "Full details: rerun Check with --format json.",
     ])
     return "\n".join(lines) + "\n"

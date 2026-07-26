@@ -139,7 +139,7 @@ def test_terminal_doctor_aggregates_supported_modules_and_hides_irrelevant_ones(
         prepared(pid=41, process_instance="p41-i1", name="python3.13", path="/python"),
     ))
     text = render_doctor_terminal(result, resolve_doctor_outcome(result))
-    assert "SQLiteWatch Doctor: HEALTHY" in text
+    assert "SQLiteWatch Check: HEALTHY" in text
     assert "SQLite-capable modules: 1" in text
     assert "supported in 2 process(es)" in text
     assert "PIDs: 41, 42" in text

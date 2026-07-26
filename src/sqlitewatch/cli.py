@@ -20,8 +20,8 @@ from .reporting import (
 from .reporting.output import write_report, write_utf8_stream
 from .reporting.sanitize import terminal_safe
 
-_DOCTOR_USAGE = (
-    "usage: sqlitewatch doctor [--format terminal|json] [--output FILE] "
+_CHECK_USAGE = (
+    "usage: sqlitewatch check [--format terminal|json] [--output FILE] "
     "[--no-follow-children] -- <command> [args...]"
 )
 
@@ -45,7 +45,7 @@ class CliConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class DoctorCliConfig:
+class CheckCliConfig:
     controller: ControllerConfig
     format: Literal["terminal", "json"] = "terminal"
     output: Path | None = None
@@ -146,7 +146,7 @@ def _parse(argv: Sequence[str]) -> tuple[CliConfig, list[str]]:
     return CliConfig(controller, rules, report_format, output), target
 
 
-def _parse_doctor(argv: Sequence[str]) -> tuple[DoctorCliConfig, list[str]]:
+def _parse_check(argv: Sequence[str]) -> tuple[CheckCliConfig, list[str]]:
     args = list(argv)
     try:
         separator = args.index("--")
@@ -178,7 +178,7 @@ def _parse_doctor(argv: Sequence[str]) -> tuple[DoctorCliConfig, list[str]]:
             value = options[index + 1]
             index += 2
         else:
-            raise CliError(f"Doctor does not support option: {option}")
+            raise CliError(f"Check does not support option: {option}")
         if option.startswith("--format"):
             if value not in {"terminal", "json"}:
                 raise CliError("--format must be 'terminal' or 'json'")
@@ -187,7 +187,7 @@ def _parse_doctor(argv: Sequence[str]) -> tuple[DoctorCliConfig, list[str]]:
             if not value:
                 raise CliError("--output requires a non-empty path")
             output = Path(value)
-    return DoctorCliConfig(
+    return CheckCliConfig(
         ControllerConfig(
             doctor=True,
             target_stdout_to_stderr=report_format == "json" and output is None,
@@ -203,14 +203,14 @@ def _stderr_line(message: str) -> None:
 
 
 def _print_instrumentation_diagnostics(
-    result: object, *, doctor: bool = False
+    result: object, *, check: bool = False
 ) -> None:
     events = getattr(result, "events", ())
     grouped: dict[tuple[str, bool], list[InstrumentationError]] = {}
     for event in events:
         if not isinstance(event, InstrumentationError):
             continue
-        if doctor and not event.fatal and event.phase == "fork_inherited_statement":
+        if check and not event.fatal and event.phase == "fork_inherited_statement":
             continue
         if event.fatal:
             _stderr_line(
@@ -240,24 +240,24 @@ def _print_instrumentation_diagnostics(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    doctor_mode = bool(args and args[0] == "doctor")
+    check_mode = bool(args and args[0] == "check")
     try:
-        config, target = _parse_doctor(args[1:]) if doctor_mode else _parse(args)
+        config, target = _parse_check(args[1:]) if check_mode else _parse(args)
     except CliError as exc:
         _stderr_line(f"sqlitewatch: {terminal_safe(exc)}")
-        _stderr_line(_DOCTOR_USAGE if doctor_mode else _USAGE)
+        _stderr_line(_CHECK_USAGE if check_mode else _USAGE)
         return 2
 
     try:
         controller = ProcessController()
-        if doctor_mode:
+        if check_mode:
             result = controller.run(target, config.controller)
-            doctor_result = reduce_events(result)
-            outcome = resolve_doctor_outcome(doctor_result)
+            check_result = reduce_events(result)
+            outcome = resolve_doctor_outcome(check_result)
             content = (
-                render_doctor_json(doctor_result, outcome)
+                render_doctor_json(check_result, outcome)
                 if config.format == "json"
-                else render_doctor_terminal(doctor_result, outcome)
+                else render_doctor_terminal(check_result, outcome)
             )
         else:
             reducer = AnalysisReducer()
@@ -287,7 +287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 70
 
-    _print_instrumentation_diagnostics(result, doctor=doctor_mode)
+    _print_instrumentation_diagnostics(result, check=check_mode)
     try:
         if config.output is None:
             write_utf8_stream(sys.stdout, content)

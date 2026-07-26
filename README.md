@@ -9,7 +9,7 @@ It can:
 - report full scans, sorts, automatic indexes, and SQLite VM work;
 - follow wrappers, workers, subprocesses, and development autoreloaders;
 - enforce optional performance limits in local development or CI;
-- verify SQLite compatibility with a dedicated Doctor command.
+- verify SQLite compatibility with a dedicated Check command.
 
 SQLiteWatch currently supports Linux x86_64 and Python 3.11–3.13.
 
@@ -18,13 +18,13 @@ SQLiteWatch currently supports Linux x86_64 and Python 3.11–3.13.
 Install a specific released version directly from its Git tag:
 
 ```bash
-uv tool install "git+https://github.com/Alurith/sqlitewatch.git@v0.2.0"
+uv tool install "git+https://github.com/Alurith/sqlitewatch.git@v0.2.1"
 ```
 
 This installs SQLiteWatch in an isolated environment and makes the `sqlitewatch` command available globally. To reinstall or switch to that exact version:
 
 ```bash
-uv tool install --force "git+https://github.com/Alurith/sqlitewatch.git@v0.2.0"
+uv tool install --force "git+https://github.com/Alurith/sqlitewatch.git@v0.2.1"
 ```
 
 You can also run SQLiteWatch from a source checkout:
@@ -108,23 +108,23 @@ The JSON report uses schema version 3 and includes process-tree and process-inst
 
 Reports may contain SQL literals or other application data. Treat them as potentially sensitive artifacts.
 
-## Doctor
+## Check
 
-Doctor checks whether SQLiteWatch can detect and instrument the SQLite implementation used by an application:
+Check verifies whether SQLiteWatch can detect and instrument the SQLite implementation used by an application:
 
 ```bash
-sqlitewatch doctor -- python app.py
+sqlitewatch check -- python app.py
 ```
 
 For a server:
 
 ```bash
-sqlitewatch doctor -- python manage.py runserver
+sqlitewatch check -- python manage.py runserver
 ```
 
 Generate some application activity, then press `Ctrl-C` to see the result.
 
-Doctor reports:
+Check reports:
 
 - whether SQLite was detected;
 - the SQLite version;
@@ -132,9 +132,9 @@ Doctor reports:
 - which processes contain supported SQLite modules;
 - whether complete SQLite activity was observed.
 
-Doctor runs the target application like the normal command because it must observe real runtime activity. The difference is the result: Doctor reports compatibility, while the normal command reports query performance.
+Check runs the target application like the normal command because it must observe real runtime activity. The difference is the result: Check reports compatibility, while the normal command reports query performance.
 
-Use Doctor when SQLiteWatch does not capture queries, when adopting it in a new application, or before enabling CI rules.
+Use Check when SQLiteWatch does not capture queries, when adopting it in a new application, or before enabling CI rules.
 
 ## Performance rules
 
@@ -175,3 +175,7 @@ SQLiteWatch preserves application failures and provides dedicated codes for its 
 - `70`: instrumentation failed, or rule evaluation was incomplete;
 - `74`: the report could not be written;
 - application exit codes and signals are preserved when they take precedence.
+
+## License
+
+SQLiteWatch is released under the [MIT License](LICENSE).

@@ -99,7 +99,7 @@ def test_nonfatal_data_loss_diagnostics_are_aggregated_for_humans(capsys):
     assert "evaluation is partial" in error
     assert "0x1" not in error and "0x2" not in error
 
-    cli._print_instrumentation_diagnostics(result, doctor=True)
+    cli._print_instrumentation_diagnostics(result, check=True)
     assert capsys.readouterr().err == ""
 
 

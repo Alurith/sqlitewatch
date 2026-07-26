@@ -13,7 +13,7 @@ MODULE = ModuleCapability(
 )
 
 
-def test_doctor_parser_is_separate_and_json_stdout_is_clean(monkeypatch, capsys):
+def test_check_parser_is_separate_and_json_stdout_is_clean(monkeypatch, capsys):
     class Controller:
         def run(self, target, config):
             assert target == ["target"]
@@ -27,24 +27,24 @@ def test_doctor_parser_is_separate_and_json_stdout_is_clean(monkeypatch, capsys)
                 ),
             ), "ACTIVE")
     monkeypatch.setattr(cli, "ProcessController", lambda: Controller())
-    assert cli.main(["doctor", "--format", "json", "--", "target"]) == 0
+    assert cli.main(["check", "--format", "json", "--", "target"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema_version"] == 3
-    assert payload["report_type"] == "sqlitewatch_doctor"
+    assert payload["report_type"] == "sqlitewatch_check"
     assert payload["status"] == "ACTIVE"
     assert payload["modules"][0]["pid"] == 1
     assert payload["modules"][0]["process_instance"] == "legacy"
     assert payload["process_tree"]["root_pid"] == 1
 
 
-def test_doctor_parser_supports_explicit_root_only_without_consuming_target_flag():
-    config, target = cli._parse_doctor([
+def test_check_parser_supports_explicit_root_only_without_consuming_target_flag():
+    config, target = cli._parse_check([
         "--no-follow-children", "--", "target", "--no-follow-children",
     ])
     assert config.controller.follow_children is False
     assert target == ["target", "--no-follow-children"]
 
 
-def test_doctor_rejects_normal_mode_options(capsys):
-    assert cli.main(["doctor", "--max-sql-length", "3", "--", "target"]) == 2
-    assert "usage: sqlitewatch doctor" in capsys.readouterr().err
+def test_check_rejects_normal_mode_options(capsys):
+    assert cli.main(["check", "--max-sql-length", "3", "--", "target"]) == 2
+    assert "usage: sqlitewatch check" in capsys.readouterr().err
